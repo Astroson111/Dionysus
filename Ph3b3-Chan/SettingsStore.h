@@ -55,4 +55,5 @@ void settingsSetMic(int idx);
 void settingsSetLed(int idx);
 void settingsSetLedColor(int idx);
 
-void launchWifiPortal();          // enter the captive portal (defined in .ino; reboots on save)
+void launchWifiPortal();          // enter the phone captive portal (defined in .ino; reboots on save)
+void launchWifiKeyboard();        // on-screen touch-keyboard WiFi entry (defined in .ino; reboots on save)

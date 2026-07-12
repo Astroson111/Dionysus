@@ -43,6 +43,7 @@
 #include "AppManager.h"
 #include "CrescentMenu.h"
 #include "SettingsStore.h"
+#include "TouchKeyboard.h"
 #include "TalkApp.h"
 #include "NetworkApp.h"
 #include "KaraokeApp.h"
@@ -420,9 +421,33 @@ static void _runPortal() {
     }
 }
 
-// Settings → WiFi Config entry: enter the existing captive portal on demand.
+// Settings → WiFi Config entry: enter the existing phone captive portal on demand.
 // _runPortal() never returns — it serves the setup form until /save → ESP.restart().
 void launchWifiPortal() { _runPortal(); }
+
+// Settings → WiFi Setup (on-screen): type SSID + password on the touchscreen, save
+// to NVS slot 0, reboot to join. No phone needed. Cancel on the SSID screen → no
+// change (returns to Settings). Reuses the same NVS slot + join path as the portal.
+void launchWifiKeyboard() {
+    String ssid = tkPrompt("Enter WiFi name (SSID):", false);
+    if (ssid.length() == 0) return;                    // cancelled
+    String pass = tkPrompt("Enter WiFi password:", true);
+
+    sPrefs.begin(NVS_NS, false);
+    sPrefs.putString(SSID_KEYS[0], ssid);
+    sPrefs.putString(PASS_KEYS[0], pass);
+    sPrefs.end();
+
+    auto& d = M5StackChan.Display();
+    d.fillScreen(TFT_BLACK);
+    d.setTextDatum(middle_center);
+    d.setTextSize(2); d.setTextColor(TFT_CYAN, TFT_BLACK);
+    d.drawString("Saved!", d.width() / 2, d.height() / 2 - 12);
+    d.setTextSize(1); d.setTextColor(TFT_WHITE, TFT_BLACK);
+    d.drawString(("Rebooting to join " + ssid).c_str(), d.width() / 2, d.height() / 2 + 16);
+    delay(1200);
+    ESP.restart();
+}
 
 static void wifiSupervisorTick() {
     static int sFailCount = 0;

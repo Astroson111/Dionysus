@@ -102,7 +102,7 @@ private:
         int row = (ty - ROW_Y0) / ROW_H;
         if (row < 0 || row >= N_ROWS) return;
         switch (row) {
-            case 0: launchWifiPortal();                       break;  // never returns (reboots)
+            case 0: launchWifiKeyboard();                     break;  // on-screen SSID+password (reboots on save)
             case 1: settingsSetMic((gMicIdx + 1) % 3);        break;
             case 2: settingsSetVol((gVolIdx + 1) % 3);        break;
             case 3: settingsSetLed((gLedIdx + 1) % 3); _brightnessPreview(); break;
