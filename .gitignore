@@ -1,0 +1,11 @@
+# Secrets — real WiFi / server creds live here, NEVER commit them.
+# Copy Ph3b3-Chan/secrets.example.h -> Ph3b3-Chan/secrets.h and fill in locally.
+Ph3b3-Chan/secrets.h
+**/secrets.h
+
+# Build artifacts
+build/
+*.bin
+*.elf
+*.map
+*.hex
