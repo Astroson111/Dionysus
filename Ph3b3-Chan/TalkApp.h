@@ -1,5 +1,6 @@
 #pragma once
 #include "AppBase.h"
+#include "SettingsStore.h"
 #include <M5StackChan.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -290,7 +291,10 @@ private:
     static constexpr uint32_t PLAYBACK_WATCHDOG_MS  = 5000;   // no audio progress this long during playback → stream hung, tear down
     static constexpr uint32_t FACE_TICK_MS          = 100;   // playback face redraw cadence (~10fps) so the bubble grows/scrolls live; raise (125/166/200) if audio sputters
     static constexpr uint16_t DBG_STATE_PORT        = 7332;  // [DBG-STATE] UDP state telemetry port on Nyx (serial dead → journal-readable)
-    static constexpr int      MIC_MAGNIFICATION     = 6;     // mic gain (narrow clean window): 16 & 8 clipped (peak 32752), 4 too faint (rms ~500). 6 targets rms ~2000 with peaks just under clip. Calibrate via /transcribe [DBG-MIC]: want rms ~2000 AND peak < ~30000
+    // Mic gain is now a runtime Settings preset: gMicMagnification (SettingsStore.h),
+    // Low 4 / Medium 6 (= this old default) / High 8. Narrow clean window: 16 & 8 clip
+    // (peak 32752), 4 is faint (rms ~500 — but still clears the server's rms<1200 silence
+    // gate at ~1730). Calibrate via /transcribe [DBG-MIC]: want rms ~2000, peak < ~30000.
     static constexpr int      JUNK_MIN_LEN          = 2;      // transcript chars below this → noise
     static constexpr int      PTT_RATE      = 16000;
     static constexpr int      PTT_MAX       = PTT_RATE * 12;  // 12s hard cap = 384 KB PSRAM
@@ -379,7 +383,7 @@ private:
         delay(30);
         auto mcfg = M5.Mic.config();
         mcfg.sample_rate   = PTT_RATE;
-        mcfg.magnification = MIC_MAGNIFICATION;
+        mcfg.magnification = gMicMagnification;
         M5.Mic.config(mcfg);
         M5.Mic.begin();
         _awaitFloor    = 0.0f;
@@ -426,7 +430,7 @@ private:
 
         auto mcfg = M5.Mic.config();
         mcfg.sample_rate   = PTT_RATE;
-        mcfg.magnification = MIC_MAGNIFICATION;
+        mcfg.magnification = gMicMagnification;
         M5.Mic.config(mcfg);
         M5.Mic.begin();
 
@@ -441,7 +445,7 @@ private:
         M5.Mic.end();
         M5.Speaker.end();
         M5.Speaker.begin();
-        M5.Speaker.setVolume(150);
+        M5.Speaker.setVolume(gSpeakerVolume);   // Settings → Volume preset
 
         if (!_pttBuf || _pttSamples < PTT_RATE / 4) {
             if (_pttBuf) { heap_caps_free(_pttBuf); _pttBuf = nullptr; }

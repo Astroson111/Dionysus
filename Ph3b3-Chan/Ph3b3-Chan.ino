@@ -42,10 +42,12 @@
 #include "AppBase.h"
 #include "AppManager.h"
 #include "CrescentMenu.h"
+#include "SettingsStore.h"
 #include "TalkApp.h"
 #include "NetworkApp.h"
 #include "KaraokeApp.h"
 #include "GhostApp.h"
+#include "SettingsApp.h"
 
 // ── TLS cert bundle ───────────────────────────────────────────────────────────
 // ISRG Root X1 (RSA) + Root X2 (ECDSA) concatenated.
@@ -140,6 +142,46 @@ static void _loadServer() {
     sPrefs.end();
     if (!seeded) _saveServer(SC_PH3B3_HOST, SC_PH3B3_PORT, SC_PH3B3_USER, SC_PH3B3_PASS);
     Serial.printf("[srv] target %s:%d\n", gSrvHost.c_str(), gSrvPort);
+}
+
+// ── Device settings (Volume / Mic / LED presets) — NVS "sc", index-persisted ──
+int   gVolIdx = SET_VOL_DEFAULT, gMicIdx = SET_MIC_DEFAULT, gLedIdx = SET_LED_DEFAULT;
+int   gSpeakerVolume    = SET_VOL_LEVELS[SET_VOL_DEFAULT];
+int   gMicMagnification = SET_MIC_LEVELS[SET_MIC_DEFAULT];
+float gLedBrightness    = SET_LED_LEVELS[SET_LED_DEFAULT];
+
+static void _settingsApply() {
+    gSpeakerVolume    = SET_VOL_LEVELS[gVolIdx];
+    gMicMagnification = SET_MIC_LEVELS[gMicIdx];
+    gLedBrightness    = SET_LED_LEVELS[gLedIdx];
+}
+
+void settingsLoad() {
+    sPrefs.begin(NVS_NS, true);
+    gVolIdx = constrain((int)sPrefs.getInt("vol", SET_VOL_DEFAULT), 0, 2);
+    gMicIdx = constrain((int)sPrefs.getInt("mic", SET_MIC_DEFAULT), 0, 2);
+    gLedIdx = constrain((int)sPrefs.getInt("led", SET_LED_DEFAULT), 0, 2);
+    sPrefs.end();
+    _settingsApply();
+    Serial.printf("[settings] vol=%s mic=%s led=%s\n",
+                  SET_VOL_NAMES[gVolIdx], SET_MIC_NAMES[gMicIdx], SET_LED_NAMES[gLedIdx]);
+}
+
+void settingsSetVol(int idx) {
+    gVolIdx = constrain(idx, 0, 2);
+    sPrefs.begin(NVS_NS, false); sPrefs.putInt("vol", gVolIdx); sPrefs.end();
+    _settingsApply();
+    M5.Speaker.setVolume(gSpeakerVolume);   // take effect immediately for the next play
+}
+void settingsSetMic(int idx) {
+    gMicIdx = constrain(idx, 0, 2);
+    sPrefs.begin(NVS_NS, false); sPrefs.putInt("mic", gMicIdx); sPrefs.end();
+    _settingsApply();   // applied on the next M5.Mic.begin() (capture path reads gMicMagnification)
+}
+void settingsSetLed(int idx) {
+    gLedIdx = constrain(idx, 0, 2);
+    sPrefs.begin(NVS_NS, false); sPrefs.putInt("led", gLedIdx); sPrefs.end();
+    _settingsApply();
 }
 
 // GET /health against the runtime record. Returns the HTTP code, or a negative
@@ -371,6 +413,10 @@ static void _runPortal() {
     }
 }
 
+// Settings → WiFi Config entry: enter the existing captive portal on demand.
+// _runPortal() never returns — it serves the setup form until /save → ESP.restart().
+void launchWifiPortal() { _runPortal(); }
+
 static void wifiSupervisorTick() {
     static int sFailCount = 0;
 
@@ -413,6 +459,7 @@ static TalkApp      talkApp;
 static NetworkApp   networkApp;
 static KaraokeApp   karaokeApp;
 static GhostApp     ghostApp;
+static SettingsApp  settingsApp;
 
 // ── Servo constants ───────────────────────────────────────────────────────────
 static const int TILT_HOME    = 450;   // 45.0° — physical center for pitch
@@ -598,6 +645,7 @@ void setup() {
     }
 
     _loadServer();   // atomic server record — seeds NVS on first boot, else reads it
+    settingsLoad();  // Volume / Mic / LED presets from NVS (seeds defaults on first boot)
     face.setStatusVisible(true);
     face.setStatusLine(gSrvHost + ":" + String(gSrvPort));   // TARGET LINE — no blind config
 
@@ -631,6 +679,7 @@ void setup() {
     appMgr.registerApp(&networkApp);  // 1
     appMgr.registerApp(&karaokeApp);  // 2
     // appMgr.registerApp(&ghostApp);    // 3 — UNREGISTERED: a stray top-left crescent-tap trapped her in Ghost (FOCUSED/frown) with no voice; Ghost is a Rung-3 stub, so drop it from the menu
+    appMgr.registerApp(&settingsApp); // last — Settings (WiFi / Mic / Volume / LED)
 
     appMgr.begin(0);  // boot into Talk
     Serial.println("[rung4] setup done");
@@ -647,7 +696,7 @@ static void _listenLeds() {
     if (listening) {
         if (millis() - lastMs >= 40) {            // ~25 fps breathe
             lastMs = millis();
-            float b = 0.6f + 0.4f * (0.5f + 0.5f * sinf(millis() / 300.0f));
+            float b = (0.6f + 0.4f * (0.5f + 0.5f * sinf(millis() / 300.0f))) * gLedBrightness;
             uint8_t r = (uint8_t)(140 * b), g = (uint8_t)(20 * b), bl = (uint8_t)(255 * b);
             for (int i = 0; i < 12; i++) M5StackChan.setRgbColor(i, r, g, bl);
             M5StackChan.refreshRgb();
