@@ -58,10 +58,10 @@ private:
 
     // Layout — panel below the crescent tab zone so the tab stays tappable.
     static const int PANEL_Y = 56;
-    static const int TITLE_Y = 72;
-    static const int ROW_Y0  = 96;
-    static const int ROW_H   = 34;
-    static const int N_ROWS  = 4;   // 0 WiFi, 1 Mic, 2 Volume, 3 LED
+    static const int TITLE_Y = 70;
+    static const int ROW_Y0  = 84;
+    static const int ROW_H   = 30;
+    static const int N_ROWS  = 5;   // 0 WiFi, 1 Mic, 2 Volume, 3 LED, 4 Color
 
     // BGR-correct color565 (mirrors Ph3b3Face::C / CrescentMenu::_col). Named _col:
     // picolibc defines _C as a macro, which would corrupt a _C(...) helper name.
@@ -78,13 +78,23 @@ private:
         M5StackChan.refreshRgb();
     }
 
-    // Light the ring at the current LED brightness for ~1.2s as visual feedback.
-    void _ledPreview() {
-        float b = gLedBrightness;
-        uint8_t r = (uint8_t)(120 * b), g = (uint8_t)(90 * b), bl = (uint8_t)(200 * b);
-        for (int i = 0; i < 12; i++) M5StackChan.setRgbColor(i, r, g, bl);
+    // Light the ring for ~1.2s as visual feedback (r,g,b already scaled).
+    void _ringPreview(uint8_t r, uint8_t g, uint8_t b) {
+        for (int i = 0; i < 12; i++) M5StackChan.setRgbColor(i, r, g, b);
         M5StackChan.refreshRgb();
         _ledPreviewEnd = millis() + 1200;
+    }
+    // Brightness change → show the current color at the new brightness.
+    void _brightnessPreview() {
+        const uint8_t* c = SET_LEDC_RGB[gLedColorIdx];
+        float b = gLedBrightness;
+        _ringPreview((uint8_t)(c[0] * b), (uint8_t)(c[1] * b), (uint8_t)(c[2] * b));
+    }
+    // Color change → show the new color at a visible level (picker-usable even at Dim/Off).
+    void _colorPreview() {
+        const uint8_t* c = SET_LEDC_RGB[gLedColorIdx];
+        float b = gLedBrightness > 0.6f ? gLedBrightness : 0.6f;
+        _ringPreview((uint8_t)(c[0] * b), (uint8_t)(c[1] * b), (uint8_t)(c[2] * b));
     }
 
     void _onTap(int tx, int ty) {
@@ -95,7 +105,8 @@ private:
             case 0: launchWifiPortal();                       break;  // never returns (reboots)
             case 1: settingsSetMic((gMicIdx + 1) % 3);        break;
             case 2: settingsSetVol((gVolIdx + 1) % 3);        break;
-            case 3: settingsSetLed((gLedIdx + 1) % 3); _ledPreview(); break;
+            case 3: settingsSetLed((gLedIdx + 1) % 3); _brightnessPreview(); break;
+            case 4: settingsSetLedColor((gLedColorIdx + 1) % SET_LEDC_N); _colorPreview(); break;
         }
     }
 
@@ -131,5 +142,6 @@ private:
         _drawRow(1, "Microphone", SET_MIC_NAMES[gMicIdx], false);
         _drawRow(2, "Volume",     SET_VOL_NAMES[gVolIdx], false);
         _drawRow(3, "LED",        SET_LED_NAMES[gLedIdx], false);
+        _drawRow(4, "Color",      SET_LEDC_NAMES[gLedColorIdx], false);
     }
 };

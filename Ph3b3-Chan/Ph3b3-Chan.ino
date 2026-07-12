@@ -146,6 +146,7 @@ static void _loadServer() {
 
 // ── Device settings (Volume / Mic / LED presets) — NVS "sc", index-persisted ──
 int   gVolIdx = SET_VOL_DEFAULT, gMicIdx = SET_MIC_DEFAULT, gLedIdx = SET_LED_DEFAULT;
+int   gLedColorIdx      = SET_LEDC_DEFAULT;
 int   gSpeakerVolume    = SET_VOL_LEVELS[SET_VOL_DEFAULT];
 int   gMicMagnification = SET_MIC_LEVELS[SET_MIC_DEFAULT];
 float gLedBrightness    = SET_LED_LEVELS[SET_LED_DEFAULT];
@@ -158,13 +159,15 @@ static void _settingsApply() {
 
 void settingsLoad() {
     sPrefs.begin(NVS_NS, true);
-    gVolIdx = constrain((int)sPrefs.getInt("vol", SET_VOL_DEFAULT), 0, 2);
-    gMicIdx = constrain((int)sPrefs.getInt("mic", SET_MIC_DEFAULT), 0, 2);
-    gLedIdx = constrain((int)sPrefs.getInt("led", SET_LED_DEFAULT), 0, 2);
+    gVolIdx      = constrain((int)sPrefs.getInt("vol",  SET_VOL_DEFAULT),  0, 2);
+    gMicIdx      = constrain((int)sPrefs.getInt("mic",  SET_MIC_DEFAULT),  0, 2);
+    gLedIdx      = constrain((int)sPrefs.getInt("led",  SET_LED_DEFAULT),  0, 2);
+    gLedColorIdx = constrain((int)sPrefs.getInt("ledc", SET_LEDC_DEFAULT), 0, SET_LEDC_N - 1);
     sPrefs.end();
     _settingsApply();
-    Serial.printf("[settings] vol=%s mic=%s led=%s\n",
-                  SET_VOL_NAMES[gVolIdx], SET_MIC_NAMES[gMicIdx], SET_LED_NAMES[gLedIdx]);
+    Serial.printf("[settings] vol=%s mic=%s led=%s color=%s\n",
+                  SET_VOL_NAMES[gVolIdx], SET_MIC_NAMES[gMicIdx], SET_LED_NAMES[gLedIdx],
+                  SET_LEDC_NAMES[gLedColorIdx]);
 }
 
 void settingsSetVol(int idx) {
@@ -182,6 +185,10 @@ void settingsSetLed(int idx) {
     gLedIdx = constrain(idx, 0, 2);
     sPrefs.begin(NVS_NS, false); sPrefs.putInt("led", gLedIdx); sPrefs.end();
     _settingsApply();
+}
+void settingsSetLedColor(int idx) {
+    gLedColorIdx = constrain(idx, 0, SET_LEDC_N - 1);
+    sPrefs.begin(NVS_NS, false); sPrefs.putInt("ledc", gLedColorIdx); sPrefs.end();
 }
 
 // GET /health against the runtime record. Returns the HTTP code, or a negative
@@ -697,7 +704,8 @@ static void _listenLeds() {
         if (millis() - lastMs >= 40) {            // ~25 fps breathe
             lastMs = millis();
             float b = (0.6f + 0.4f * (0.5f + 0.5f * sinf(millis() / 300.0f))) * gLedBrightness;
-            uint8_t r = (uint8_t)(140 * b), g = (uint8_t)(20 * b), bl = (uint8_t)(255 * b);
+            const uint8_t* c = SET_LEDC_RGB[gLedColorIdx];   // Settings → LED Color
+            uint8_t r = (uint8_t)(c[0] * b), g = (uint8_t)(c[1] * b), bl = (uint8_t)(c[2] * b);
             for (int i = 0; i < 12; i++) M5StackChan.setRgbColor(i, r, g, bl);
             M5StackChan.refreshRgb();
         }
