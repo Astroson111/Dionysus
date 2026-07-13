@@ -87,7 +87,7 @@ esptool --port /dev/ttyACM0 read-mac     # Dio = 44:1b:f6:e5:56:60
 ## Voice & session
 - **Long stories play whole.** Replies stream as chunked TTS (a manifest chunk, then lazy
   `GET /tts/chunk/{sid}/{n}`), played first-chunk-while-fetching-next. There is **no wall-clock
-  cap** on the reply: an **inter-chunk watchdog** resets on every byte from Nyx and tears down
+  cap** on the reply: an **inter-chunk watchdog** resets on every byte from the server and tears down
   only a genuinely *stalled* stream, so a five-minute recitation holds to the end while a hung
   connection still bails fast. (Replaces the old fixed 60 s per-chunk read deadline that could
   truncate a long reply when the server was slow to synthesize.)
