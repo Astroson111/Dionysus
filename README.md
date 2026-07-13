@@ -17,17 +17,35 @@ voice-synced captions.
 ## Repo layout
 ```
 Ph3b3-Chan/          the Arduino sketch (open this folder in the IDE)
-  Ph3b3-Chan.ino     entry point + app registration
+  Ph3b3-Chan.ino     entry point, app registration, WiFi, boot homing, LED cue
   AppManager.h       cooperative app/state manager
-  MenuApp.h / CrescentMenu.h   main menu
+  CrescentMenu.h     the mode drawer (swipe the top-left crescent to open)
   TalkApp.h          voice pipeline: tap→record→/transcribe→/chat/stream→play
   KaraokeApp.h       SD-card karaoke
-  GhostApp.h         "ghost hunting" mode
-  NetworkApp.h       WiFi captive-portal config
+  NetworkApp.h       "Network" scan-intent stub (NOT WiFi config — see Settings)
+  GhostApp.h         "ghost hunting" mode (unregistered by default)
+  SettingsApp.h      Settings screen (WiFi / Mic / Volume / LED / Color)
+  SettingsStore.h    settings presets + NVS persistence (namespace "sc")
+  TouchKeyboard.h    on-screen touch QWERTY (device-native WiFi entry)
   ph3b3_face.h       the animated face + speech bubble renderer
   secrets.example.h  copy to secrets.h (gitignored) and fill in
 docs/                audit + hardware contracts
 ```
+
+## Controls & Settings
+- **Mode drawer** — tap/swipe the **crescent tab** (top-left corner); swipe *right* to slide
+  it open, then tap a mode: **Talk · Network · Karaoke · Settings**.
+- **Head-pat** — pet the Si12T sensor on her head and the LED ring glows **pink**, brighter the
+  harder you pet (respects the LED brightness setting below).
+- **Settings** (last item in the drawer) — tap-to-cycle rows; a **right-to-left swipe** anywhere
+  exits back to her face. All choices persist to NVS (namespace `"sc"`) and reload at boot:
+  | Row | Options | Effect |
+  |-----|---------|--------|
+  | **WiFi Setup** | on-screen keyboard | Type SSID + password on the touchscreen, save + reboot to join. No phone needed. (The phone captive portal `Dio-Setup` still auto-appears as a fallback on repeated connect failure.) |
+  | **Microphone** | Low / **Medium** / High | Capture gain 4 / 6 / 8. Medium is the tuned default. |
+  | **Volume** | Low / **Medium** / High | Speaker output 40 / 70 / 100%. |
+  | **LED** | Off / Dim / **Full** | Brightness of the status/pet ring. Off = dark (status logic still runs). |
+  | **Color** | Purple … White (9) | Color of the *listening* ring. Default Purple; pet stays pink. |
 
 ## Build & flash
 Use **arduino-cli** (or the Arduino IDE). **Never PlatformIO** — `pio run` builds the wrong
@@ -60,8 +78,13 @@ esptool --port /dev/ttyACM0 read-mac     # Dio = 44:1b:f6:e5:56:60
 - Speaker (I2S_NUM_1) and mic (I2S_NUM_0) share BCK/WS; call `M5.Speaker.end()` before
   `M5.Mic.begin()` or the mic records zeros.
 - Serial is dead on this unit — the **screen is the instrument**.
+- **The tilt (vertical) servo needs battery power to home** — USB-only is current-limited and
+  can't lift the head against gravity (pan homes fine, tilt droops). This is power, not code;
+  don't "fix" it by firming up `gentleHome()` (more torque draws more current → brown-out).
+- Row/array names must not be `LOW`/`HIGH` — those are Arduino GPIO macros.
 
 ## Server
-Dio targets the Ph3b3 server at `https://<host>:7331` (mkcert TLS, `setInsecure()`), configured
-via the WiFi portal / NVS. Voice endpoints: `POST /transcribe`, `POST /chat/stream` +
+Dio targets the Ph3b3 server at `https://<host>:7331` (mkcert TLS, `setInsecure()`); WiFi + host
+are set via **Settings → WiFi Setup** (on-screen keyboard) or the `Dio-Setup` captive portal, and
+stored atomically in NVS. Voice endpoints: `POST /transcribe`, `POST /chat/stream` +
 `GET /tts/chunk/{sid}/{n}` (chunked TTS so long replies stream instead of timing out).
