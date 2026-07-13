@@ -19,6 +19,10 @@ extern int    gSrvPort;
 extern String gSrvUser;
 extern String gSrvPass;
 
+// millis() of the last head-pat (Si12T), stamped by _cueLeds() in the .ino.
+// A head-pat is an activity signal that keeps her awake (feeds the dead-air exit).
+extern volatile uint32_t gLastPetMs;
+
 // ── TalkApp — full Ph3b3 voice round-trip ────────────────────────────────────
 //
 // Flow:  tap screen → LISTENING (record) → release or 5s max → THINKING
@@ -137,8 +141,13 @@ public:
                 Serial.printf("[await] floor=%.4f\n", _awaitFloor);
             }
 
-            // Any speech resets the dead-air session timer.
+            // Activity resets the dead-air session timer. Speech (onset) is one
+            // signal; a head-pat within the last ~1.5s is another — petting her
+            // keeps her awake instead of dropping to dormant mid-cuddle. (TTS
+            // playback and chunk arrival can't fire here: playback is blocking, so
+            // the dead-air clock is already refreshed post-reply.)
             if (_awaitFloor > 0.0f && rms > _awaitFloor * ONSET_THRESH) _deadAirStartMs = now;
+            if (gLastPetMs && now - gLastPetMs < 1500) _deadAirStartMs = now;
 
             // Dead air: DEAD_AIR_MS of true silence in chat mode (no TTS runs in
             // AWAITING; speech resets above) → end chat mode and go dormant.
@@ -289,6 +298,7 @@ private:
     static constexpr uint32_t CONV_IDLE_MS          = 9000;   // 9s no valid speech → end loop
     static constexpr uint32_t DEAD_AIR_MS           = 10000;  // 10s true silence in chat mode → exit to dormant (NVS candidate, like spk_vol)
     static constexpr uint32_t PLAYBACK_WATCHDOG_MS  = 5000;   // no audio progress this long during playback → stream hung, tear down
+    static constexpr uint32_t PEEK_SILENCE_MS       = 15000;  // no bytes this long while reading a chunk's head → stream stalled (inter-byte watchdog, NOT a total cap)
     static constexpr uint32_t FACE_TICK_MS          = 100;   // playback face redraw cadence (~10fps) so the bubble grows/scrolls live; raise (125/166/200) if audio sputters
     static constexpr uint16_t DBG_STATE_PORT        = 7332;  // [DBG-STATE] UDP state telemetry port on Nyx (serial dead → journal-readable)
     // Mic gain is now a runtime Settings preset: gMicMagnification (SettingsStore.h),
@@ -792,18 +802,27 @@ private:
             raw->setTimeout(30000);
             int bodyTotal = _http.getSize();
             int pl = 0;
-            uint32_t deadline = millis() + 60000;
-            while (pl < PEEK_MAX && millis() < deadline) {
+            // Inter-byte watchdog, NOT a wall-clock cap: reset on every byte, give
+            // up only after PEEK_SILENCE_MS of dead air. A slow-but-progressing head
+            // read (Nyx busy synthesising, e.g. GPU-locked) is never truncated; a
+            // hung/killed stream is caught. Mirrors the Iris fix.
+            uint32_t lastRxMs = millis();
+            while (pl < PEEK_MAX) {
                 int avail = raw->available();
                 if (avail > 0) {
                     int n = min(avail, PEEK_MAX - pl);
                     pl += raw->readBytes(peek + pl, n);
                     peek[pl] = '\0';
+                    lastRxMs = millis();
                     if (pl > 20 && strstr(peek, "\"audio\":\"")) break;
                     if (bodyTotal > 0 && pl >= bodyTotal) break;
                 } else if (!raw->connected()) {
                     break;
                 } else if (bodyTotal > 0 && pl >= bodyTotal) {
+                    break;
+                } else if (millis() - lastRxMs >= PEEK_SILENCE_MS) {
+                    Serial.printf("[peek] silence %ums — stream stalled, giving up\n",
+                                  (unsigned)PEEK_SILENCE_MS);
                     break;
                 } else {
                     face.update();

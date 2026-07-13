@@ -152,6 +152,11 @@ int   gSpeakerVolume    = SET_VOL_LEVELS[SET_VOL_DEFAULT];
 int   gMicMagnification = SET_MIC_LEVELS[SET_MIC_DEFAULT];
 float gLedBrightness    = SET_LED_LEVELS[SET_LED_DEFAULT];
 
+// Last head-pat time — stamped in _cueLeds() (LED path, already reads pet), read
+// by TalkApp's dead-air exit so petting counts as activity. Timestamp only; it
+// never gates the render path (per the sputter-throttle lesson).
+volatile uint32_t gLastPetMs = 0;
+
 static void _settingsApply() {
     gSpeakerVolume    = SET_VOL_LEVELS[gVolIdx];
     gMicMagnification = SET_MIC_LEVELS[gMicIdx];
@@ -730,6 +735,7 @@ static void _cueLeds() {
     static uint32_t lastMs   = 0;
     const auto& ints = M5StackChan.TouchSensor.getIntensities();  // 3 ch, 0..3 each
     int  pet       = (int)ints[0] + (int)ints[1] + (int)ints[2];  // 0..9
+    if (pet > 0) gLastPetMs = millis();   // activity signal for the dead-air exit (timestamp only)
     bool listening = (face.getState() == Ph3b3Face::LISTENING);
     int  mode      = pet > 0 ? 2 : (listening ? 1 : 0);
 
