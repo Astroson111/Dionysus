@@ -717,16 +717,29 @@ void setup() {
     Serial.println("[rung4] setup done");
 }
 
-// LISTENING attention cue — the 12 base LEDs breathe PURPLE while she records,
-// so you can tell at 2 m when to talk. LED-only: reads face.getState() (never
-// touches servo/VAD/mic/PTT/state-machine). Reserved color contract: LISTENING =
-// purple; Si12T head-pat = PINK — the two must never read as the same colour.
-static void _listenLeds() {
-    static bool     wasListening = false;
-    static uint32_t lastMs       = 0;
+// Base-LED cue authority — one place drives the 12 base LEDs, by priority:
+//   PET (pink) > LISTENING (LED Color) > leave alone.
+// Head-pat (Si12T @ I2C 0x68) is read via the BSP TouchSensor, which M5.begin()/
+// M5StackChan.update() already init + poll every loop — we only CONSUME it here,
+// in ANY state; pink brightness scales with pet intensity. LED-only: reads
+// TouchSensor + face.getState(); never touches servo/VAD/PTT/state/karaoke.
+// Color contract: pet = PINK (locked); listening = the LED Color setting (default
+// purple). Both scaled by the LED brightness setting (Off → dark).
+static void _cueLeds() {
+    static int      lastMode = 0;      // 0 none, 1 listen, 2 pet
+    static uint32_t lastMs   = 0;
+    const auto& ints = M5StackChan.TouchSensor.getIntensities();  // 3 ch, 0..3 each
+    int  pet       = (int)ints[0] + (int)ints[1] + (int)ints[2];  // 0..9
     bool listening = (face.getState() == Ph3b3Face::LISTENING);
-    if (listening) {
-        if (millis() - lastMs >= 40) {            // ~25 fps breathe
+    int  mode      = pet > 0 ? 2 : (listening ? 1 : 0);
+
+    if (mode == 2) {                   // PET → pink (locked), brighter the harder you pet
+        float b = (0.55f + 0.45f * (pet >= 6 ? 1.0f : pet / 6.0f)) * gLedBrightness;
+        uint8_t r = (uint8_t)(255 * b), g = (uint8_t)(45 * b), bl = (uint8_t)(140 * b);
+        for (int i = 0; i < 12; i++) M5StackChan.setRgbColor(i, r, g, bl);
+        M5StackChan.refreshRgb();
+    } else if (mode == 1) {            // LISTENING → LED Color breathe (~25 fps)
+        if (millis() - lastMs >= 40) {
             lastMs = millis();
             float b = (0.6f + 0.4f * (0.5f + 0.5f * sinf(millis() / 300.0f))) * gLedBrightness;
             const uint8_t* c = SET_LEDC_RGB[gLedColorIdx];   // Settings → LED Color
@@ -734,11 +747,11 @@ static void _listenLeds() {
             for (int i = 0; i < 12; i++) M5StackChan.setRgbColor(i, r, g, bl);
             M5StackChan.refreshRgb();
         }
-    } else if (wasListening) {                     // edge: clear once on exit
+    } else if (lastMode != 0) {        // fell to none → clear once
         for (int i = 0; i < 12; i++) M5StackChan.setRgbColor(i, 0, 0, 0);
         M5StackChan.refreshRgb();
     }
-    wasListening = listening;
+    lastMode = mode;
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
@@ -762,7 +775,7 @@ void loop() {
     // it doesn't overwrite them every frame (that was the Settings flicker).
     bool appOwnsScreen = appMgr.active() && appMgr.active()->ownsScreen();
     if (!appOwnsScreen) face.update();  // renders face + crescent tab onto canvas, pushes
-    _listenLeds();          // purple attention LEDs while LISTENING (LED-only, no servo)
+    _cueLeds();             // base-LED cue: pet=pink (any state) > listening=LED Color (LED-only)
     appMgr.draw();          // app overlays (e.g. karaoke lyrics)
     crescentMenu.draw();    // mode panel slides over everything when open
 
