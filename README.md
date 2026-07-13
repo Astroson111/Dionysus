@@ -9,6 +9,10 @@ voice-synced captions.
 > Extracted 2026-07-12 from the `ph3b3` monorepo into its own home. The Ph3b3 server (STT,
 > reasoning, TTS) lives separately; Dio talks to it over HTTPS on the LAN.
 
+**Ecosystem:** [Ph3b3](https://github.com/astroson111/ph3b3) — the local server (STT · reasoning ·
+TTS) · [Iris](https://github.com/astroson111/iris) — the wearable combadge, Ph3b3's other body ·
+Dio (this repo). All local, all clients of the same server.
+
 ## Hardware
 - **M5Stack CoreS3** (ESP32-S3, 320×240 display, built-in PDM mic + I2S speaker)
 - Stack-Chan servo base (X/Y neck) via the M5StackChan BSP
