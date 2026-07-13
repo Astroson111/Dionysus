@@ -758,7 +758,10 @@ void loop() {
 
     crescentMenu.update();  // updates g_overlayOpen + handles mode-switch taps
     appMgr.update();        // app logic (checks g_overlayOpen before processing touches)
-    face.update();          // renders face + crescent tab onto canvas, pushes to display
+    // Full-screen apps (e.g. Settings) draw their own screen; skip the face push so
+    // it doesn't overwrite them every frame (that was the Settings flicker).
+    bool appOwnsScreen = appMgr.active() && appMgr.active()->ownsScreen();
+    if (!appOwnsScreen) face.update();  // renders face + crescent tab onto canvas, pushes
     _listenLeds();          // purple attention LEDs while LISTENING (LED-only, no servo)
     appMgr.draw();          // app overlays (e.g. karaoke lyrics)
     crescentMenu.draw();    // mode panel slides over everything when open
