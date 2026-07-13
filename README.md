@@ -36,7 +36,8 @@ docs/                audit + hardware contracts
 - **Mode drawer** — tap/swipe the **crescent tab** (top-left corner); swipe *right* to slide
   it open, then tap a mode: **Talk · Network · Karaoke · Settings**.
 - **Head-pat** — pet the Si12T sensor on her head and the LED ring glows **pink**, brighter the
-  harder you pet (respects the LED brightness setting below).
+  harder you pet (respects the LED brightness setting below). A pat also counts as activity, so
+  petting her keeps her awake instead of dropping to dormant mid-cuddle.
 - **Settings** (last item in the drawer) — tap-to-cycle rows; a **right-to-left swipe** anywhere
   exits back to her face. All choices persist to NVS (namespace `"sc"`) and reload at boot:
   | Row | Options | Effect |
@@ -82,6 +83,19 @@ esptool --port /dev/ttyACM0 read-mac     # Dio = 44:1b:f6:e5:56:60
   can't lift the head against gravity (pan homes fine, tilt droops). This is power, not code;
   don't "fix" it by firming up `gentleHome()` (more torque draws more current → brown-out).
 - Row/array names must not be `LOW`/`HIGH` — those are Arduino GPIO macros.
+
+## Voice & session
+- **Long stories play whole.** Replies stream as chunked TTS (a manifest chunk, then lazy
+  `GET /tts/chunk/{sid}/{n}`), played first-chunk-while-fetching-next. There is **no wall-clock
+  cap** on the reply: an **inter-chunk watchdog** resets on every byte from Nyx and tears down
+  only a genuinely *stalled* stream, so a five-minute recitation holds to the end while a hung
+  connection still bails fast. (Replaces the old fixed 60 s per-chunk read deadline that could
+  truncate a long reply when the server was slow to synthesize.)
+- **Completion = audio drained, not stream closed.** She keeps talking until her local playback
+  buffer empties, even if the network stream closed while she was still mid-sentence.
+- **Activity-based session exit.** A chunk arriving, audio playing, detected speech, or a
+  head-pat all reset the idle clock; she drops to dormant only after true dead air (~10 s), never
+  on a fixed timer. Tap her face (or pet her) to keep her awake / wake her back up.
 
 ## Server
 Dio targets the Ph3b3 server at `https://<host>:7331` (mkcert TLS, `setInsecure()`); WiFi + host
