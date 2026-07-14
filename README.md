@@ -11,7 +11,8 @@ voice-synced captions.
 
 **Ecosystem:** [Ph3b3](https://github.com/astroson111/ph3b3) — the local server (STT · reasoning ·
 TTS) · [Iris](https://github.com/astroson111/iris) — the wearable combadge, Ph3b3's other body ·
-Dio (this repo). All local, all clients of the same server.
+[Control Panel](https://github.com/astroson111/ph3b3/tree/main/static) — the local web PWA (served
+by Ph3b3) · Dio (this repo). All local, all clients of the same server.
 
 ## Hardware
 - **M5Stack CoreS3** (ESP32-S3, 320×240 display, built-in PDM mic + I2S speaker)
