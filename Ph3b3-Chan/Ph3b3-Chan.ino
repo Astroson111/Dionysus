@@ -684,7 +684,7 @@ void setup() {
     _loadServer();   // atomic server record — seeds NVS on first boot, else reads it
     settingsLoad();  // Volume / Mic / LED presets from NVS (seeds defaults on first boot)
     face.setStatusVisible(true);
-    face.setStatusLine(gSrvHost + ":" + String(gSrvPort));   // TARGET LINE — no blind config
+    face.setStatusLine("connecting");   // on-screen IP:port removed (Astro)
 
     int n = _loadCreds(ssids, passes);
     Serial.printf("[wifi] _loadCreds → n=%d\n", n);
@@ -698,12 +698,11 @@ void setup() {
             Serial.printf("[wifi] connected: %s\n", WiFi.localIP().toString().c_str());
             // Boot health probe → cause-differentiated status + target (Iris lesson)
             int hc = _healthCheck();
-            String tgt = gSrvHost + ":" + String(gSrvPort);
-            String st = (hc >= 200 && hc < 300) ? ("online "   + tgt)
-                      : (hc == 401 || hc == 403) ? ("denied "   + tgt)
-                      : (hc < 0)                  ? ("no route " + tgt)
-                      :                             ("away "     + tgt);
-            face.setStatusLine(st);
+            String st = (hc >= 200 && hc < 300) ? "online"
+                      : (hc == 401 || hc == 403) ? "denied"
+                      : (hc < 0)                  ? "no route"
+                      :                             "away";
+            face.setStatusLine(st);   // status word only — on-screen IP:port removed (Astro)
             Serial.printf("[srv] health=%d -> %s\n", hc, st.c_str());
         } else {
             Serial.println("[wifi] not connected at boot — will retry in loop");
