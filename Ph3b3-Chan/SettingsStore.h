@@ -10,7 +10,7 @@
 //   gLedBrightness    → scales the status LED cue (_listenLeds in the .ino)
 //
 // WiFi Config is not a preset — it launches the on-screen WiFi keyboard
-// (launchWifiKeyboard: SSID + key on the touchscreen, connect-first).
+// (launchWifiPortal: captive Dio-Setup portal — phone at 192.168.4.1).
 
 // Preset tables (index → applied value). static const = per-TU copy, tiny.
 static const int   SET_VOL_LEVELS[3] = {102, 178, 255};    // Low 40% / Med 70% / High 100% of 255
@@ -56,4 +56,3 @@ void settingsSetLed(int idx);
 void settingsSetLedColor(int idx);
 
 void launchWifiPortal();          // captive setup portal (defined in .ino)
-void launchWifiKeyboard();        // on-screen touch-keyboard WiFi entry (defined in .ino; connect-first)

@@ -44,7 +44,6 @@
 #include "AppManager.h"
 #include "CrescentMenu.h"
 #include "SettingsStore.h"
-#include "TouchKeyboard.h"
 #include "TalkApp.h"
 #include "NetworkApp.h"
 #include "KaraokeApp.h"
@@ -286,17 +285,6 @@ static void _tryNextNetwork() {
     _wifiJoin(ssids[slot].c_str(), passes[slot].c_str());
 }
 
-// WiFi provisioning is the on-screen keyboard (launchWifiKeyboard) — the
-// Dio-Setup captive web portal was removed 2026-07-16.
-
-// ── On-screen WiFi provisioning (Settings → WiFi Setup) ───────────────────────
-// Retro-violet screens matching the keyboard. SSID → password → LIVE connect →
-// persist ONLY on a confirmed join. Cardinal rule: never write creds to NVS
-// before they're proven to connect, so a wrong/blank entry can't brick her into
-// an unjoinable reboot loop (the lockout we had to reflash out of). All screens
-// are self-contained blocking loops (own touch handling + M5StackChan.update())
-// — they do NOT run through the face render loop (render-starvation lesson).
-
 // Violet palette helper, BGR-aware like the keyboard (styling stays consistent).
 static uint16_t _pcol(uint8_t r, uint8_t g, uint8_t b) {
     auto& d = M5StackChan.Display();
@@ -307,107 +295,6 @@ static uint16_t _pcol(uint8_t r, uint8_t g, uint8_t b) {
 #endif
 }
 
-// Centred status card. line2 optional (pass "" to omit).
-static void _provMsg(const char* line1, const String& line2, uint16_t accent) {
-    auto& d = M5StackChan.Display();
-    d.fillScreen(_pcol(8, 6, 20));
-    d.setTextDatum(middle_center);
-    d.setTextSize(2); d.setTextColor(accent, _pcol(8, 6, 20));
-    d.drawString(line1, d.width() / 2, d.height() / 2 - 14);
-    if (line2.length()) {
-        d.setTextSize(1); d.setTextColor(_pcol(200, 185, 235), _pcol(8, 6, 20));
-        d.drawString(line2.c_str(), d.width() / 2, d.height() / 2 + 14);
-    }
-}
-
-// Live join attempt on a "Connecting..." screen, up to ~15s. Returns true on
-// WL_CONNECTED. Keeps touch/servos alive; NEVER persists.
-static bool _provConnect(const String& ssid, const String& pass) {
-    _provMsg("Connecting...", ssid, _pcol(150, 210, 255));
-    WiFi.disconnect(false);
-    WiFi.begin(ssid.c_str(), pass.c_str());
-    uint32_t t0 = millis();
-    while (millis() - t0 < 15000) {
-        if (WiFi.status() == WL_CONNECTED) return true;
-        M5StackChan.update();          // touch/servos alive; not the face render loop
-        delay(50);
-    }
-    return WiFi.status() == WL_CONNECTED;
-}
-
-// Fail screen with three buttons. Returns 0 = retry password, 1 = re-enter SSID,
-// -1 = cancel. Own touch loop; retro-violet style.
-static int _provFailScreen(const String& ssid) {
-    auto& d = M5StackChan.Display();
-    const int BX = 30, BW = d.width() - 60, BH = 34;
-    const int Y_RETRY = 84, Y_SSID = 126, Y_CANCEL = 168;
-    auto btn = [&](int y, const char* lbl) {
-        d.fillRoundRect(BX, y, BW, BH, 6, _pcol(40, 22, 80));
-        d.drawRoundRect(BX, y, BW, BH, 6, _pcol(90, 55, 165));
-        d.setTextDatum(middle_center);
-        d.setTextColor(_pcol(225, 210, 255), _pcol(40, 22, 80));
-        d.drawString(lbl, d.width() / 2, y + BH / 2);
-    };
-    d.fillScreen(_pcol(8, 6, 20));
-    d.setTextDatum(middle_center);
-    d.setTextSize(2); d.setTextColor(_pcol(255, 120, 120), _pcol(8, 6, 20));
-    d.drawString("Couldn't connect", d.width() / 2, 32);
-    d.setTextSize(1); d.setTextColor(_pcol(190, 175, 225), _pcol(8, 6, 20));
-    d.drawString(("to " + ssid).c_str(), d.width() / 2, 56);
-    btn(Y_RETRY,  "Retry password");
-    btn(Y_SSID,   "Re-enter SSID");
-    btn(Y_CANCEL, "Cancel");
-
-    bool wasTouch = false;
-    for (;;) {
-        M5StackChan.update();
-        int16_t tx = 0, ty = 0;
-        bool touching = d.getTouch(&tx, &ty);
-        if (touching && !wasTouch) {
-            wasTouch = true;
-            if (tx >= BX && tx <= BX + BW) {
-                if (ty >= Y_RETRY  && ty < Y_RETRY  + BH) return 0;
-                if (ty >= Y_SSID   && ty < Y_SSID   + BH) return 1;
-                if (ty >= Y_CANCEL && ty < Y_CANCEL + BH) return -1;
-            }
-        } else if (!touching) wasTouch = false;
-        delay(8);
-    }
-}
-
-// Settings → WiFi Setup. SSID/pass are threaded through a local state machine —
-// no globals, no reboot. Persists to NVS slot 0 ONLY after a live connect; any
-// cancel (or blank password) backs out with stored creds untouched.
-void launchWifiKeyboard() {
-    String ssid, pass;
-    enum { S_SSID, S_PASS, S_CONNECT } st = S_SSID;
-    for (;;) {
-        if (st == S_SSID) {
-            ssid = tkPrompt("Enter WiFi name (SSID):", false);
-            if (ssid.length() == 0) return;                 // cancel → NVS untouched
-            st = S_PASS;
-        } else if (st == S_PASS) {
-            pass = tkPrompt("Enter WiFi password:", true);
-            if (pass.length() == 0) return;                 // cancel/blank → NVS untouched
-            st = S_CONNECT;
-        } else {  // S_CONNECT
-            if (_provConnect(ssid, pass)) {
-                sWifiConnected = true; sConnectedAt = millis(); sSyncDone = false; sHealthOnline = false;
-                _provMsg("Connected!", "Saved " + ssid, _pcol(120, 240, 150));   // confirm first
-                sPrefs.begin(NVS_NS, false);                // THEN persist — only after a live join
-                sPrefs.putString(SSID_KEYS[0], ssid);
-                sPrefs.putString(PASS_KEYS[0], pass);
-                sPrefs.end();
-                delay(1600);
-                return;
-            }
-            int choice = _provFailScreen(ssid);
-            if (choice == 0)      st = S_PASS;              // retry password, no reboot
-            else if (choice == 1) st = S_SSID;             // re-enter SSID
-            else { sLastReconnect = 0; return; }           // cancel → supervisor rejoins old NVS creds
-        }
-    }
-}
 
 static void _runPortal() {
     Serial.println("[wifi] portal — Dio-Setup 192.168.4.1");
