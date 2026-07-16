@@ -107,17 +107,6 @@ inline String tkPrompt(const char* title, bool mask) {
         if (dirty) { render(); dirty = false; }
         int16_t tx = 0, ty = 0;
         bool touching = d.getTouch(&tx, &ty);
-        // DIAGNOSTIC (serial is dead → the screen is the instrument): show the raw
-        // touch coords top-right whenever the panel reports a touch. If a tap that
-        // looks like it's on a key shows coords that DON'T land in that key's rect,
-        // it's a hit-test/geometry mismatch. Persists on a no-register tap (screen
-        // only repaints when something changes). Remove once the keyboard is proven.
-        if (touching) {
-            d.fillRect(d.width() - 82, 0, 82, 11, col(8, 6, 20));
-            d.setTextDatum(top_right); d.setTextSize(1);
-            d.setTextColor(col(255, 200, 120), col(8, 6, 20));
-            d.drawString(String(tx) + "," + String(ty), d.width() - 2, 1);
-        }
         if (touching && !wasTouch) {
             wasTouch = true;
             int a = keys(false, tx, ty);
