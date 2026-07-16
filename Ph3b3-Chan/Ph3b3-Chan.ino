@@ -35,6 +35,9 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <DNSServer.h>
+#include <WebServer.h>
+#include <esp_wifi.h>
 
 #include "ph3b3_face.h"
 #include "AppBase.h"
@@ -252,6 +255,24 @@ static int _loadCreds(String ssids[], String passes[]) {
 // (Server-side network sync removed 2026-07-16 — Dio provisions WiFi on-device
 //  via the Dio-Setup portal; the /stackchan/networks endpoint no longer exists.)
 
+// Robust WiFi join (Iris pattern): full teardown + PMF-capable connect. Bare
+// WiFi.begin() doesn't free the WPA supplicant buffers on reason 26/32 and can't
+// negotiate PMF-required APs — the likely cause of Dio's flaky association.
+static void _wifiJoin(const char* ssid, const char* pass) {
+    WiFi.mode(WIFI_OFF);
+    delay(400);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);
+    wifi_config_t conf = {};
+    strlcpy((char*)conf.sta.ssid,     ssid, sizeof(conf.sta.ssid));
+    strlcpy((char*)conf.sta.password, pass, sizeof(conf.sta.password));
+    conf.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    conf.sta.pmf_cfg.capable    = true;
+    conf.sta.pmf_cfg.required   = false;
+    esp_wifi_set_config(WIFI_IF_STA, &conf);
+    esp_wifi_connect();
+}
+
 static void _tryNextNetwork() {
     String ssids[SC_MAX_NETS], passes[SC_MAX_NETS];
     int n = _loadCreds(ssids, passes);
@@ -261,9 +282,8 @@ static void _tryNextNetwork() {
     }
     static int slot = 0;
     slot = (slot + 1) % n;
-    Serial.printf("[wifi] trying slot %d: %s\n", slot, ssids[slot].c_str());
-    WiFi.disconnect(false);
-    WiFi.begin(ssids[slot].c_str(), passes[slot].c_str());
+    Serial.printf("[wifi] reconnect slot %d: %s\n", slot, ssids[slot].c_str());
+    _wifiJoin(ssids[slot].c_str(), passes[slot].c_str());
 }
 
 // WiFi provisioning is the on-screen keyboard (launchWifiKeyboard) — the
@@ -389,6 +409,174 @@ void launchWifiKeyboard() {
     }
 }
 
+static void _runPortal() {
+    Serial.println("[wifi] portal — Dio-Setup 192.168.4.1");
+    face.setState(Ph3b3Face::CONNECTING);
+
+    WiFi.mode(WIFI_OFF);
+    delay(200);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("Dio-Setup");
+    delay(200);
+
+    DNSServer dns;
+    dns.start(53, "*", IPAddress(192, 168, 4, 1));
+
+    WebServer server(80);
+
+    server.on("/", HTTP_GET, [&]() {
+        server.send(200, "text/html",
+            "<!DOCTYPE html><html><head>"
+            "<meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Dio Setup</title>"
+            "<style>"
+            "body{font-family:sans-serif;background:#0a0318;color:#e0d4ff;"
+                 "max-width:480px;margin:0 auto;padding:1rem}"
+            "h1{color:#a855f7}"
+            "p{color:#a09ab8;font-size:.85rem}"
+            "label{font-size:.8rem;color:#a09ab8;display:block;margin-top:.8rem}"
+            "input{width:100%;box-sizing:border-box;background:#0d0525;"
+                  "border:1px solid #4b2c8a;border-radius:4px;color:#e0d4ff;"
+                  "padding:.4rem .5rem;font-size:.95rem;margin-top:2px}"
+            "button{width:100%;margin-top:1.2rem;padding:.75rem;background:#7e22ce;"
+                   "border:none;border-radius:8px;color:#fff;font-size:1rem;"
+                   "font-weight:700;cursor:pointer}"
+            "button:hover{background:#9333ea}"
+            "</style></head><body>"
+            "<h1>Dio Setup</h1>"
+            "<p>Enter your WiFi credentials. "
+            "Additional networks sync from Ph3b3 after first connect.</p>"
+            "<form method='POST' action='/save'>"
+            "<label>WiFi Name (SSID)</label>"
+            "<input name='ssid' autocomplete='off' autofocus required>"
+            "<label>WiFi Password (network key)</label>"
+            "<input name='pass' type='password' required minlength='8'>"
+            "<label>Ph3b3 host</label>"
+            "<input name='host' value='" + gSrvHost + "'>"
+            "<label>Ph3b3 port</label>"
+            "<input name='port' value='" + String(gSrvPort) + "'>"
+            "<button type='submit'>Save &amp; Reboot</button>"
+            "</form>"
+            "<div style='position:fixed;bottom:12px;right:12px;width:110px;opacity:0.75'>"
+            "<svg width='100%' viewBox='0 0 680 460' role='img' xmlns='http://www.w3.org/2000/svg'>"
+            "<title>Peach, a golden retriever, sleeping in a little bed</title>"
+            "<desc>A line-art golden retriever curled up asleep in a small cushioned bed, "
+            "with a crescent moon and small stars above, drawn in a soft monochrome style "
+            "to match the Ph3b3 crescent art.</desc>"
+            "<style>"
+            ".ink{fill:none;stroke:#2b2b2b;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}"
+            ".ink-soft{fill:none;stroke:#6b6b6b;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}"
+            ".fur{fill:#e8a85c;opacity:0.22}"
+            ".bed{fill:#6b6b6b;opacity:0.10}"
+            ".cap{fill:#6b6b6b;font-family:Georgia,serif;font-size:15px;font-style:italic}"
+            "</style>"
+            "<circle cx='500' cy='95' r='34' fill='none' stroke='#6b6b6b' stroke-width='1.5'/>"
+            "<circle cx='512' cy='88' r='34' fill='#ffffff' stroke='none'/>"
+            "<circle cx='512' cy='88' r='34' fill='#6b6b6b' opacity='0.10'/>"
+            "<path d='M180 150 l3 7 l7 1 l-5 5 l1 7 l-6 -3 l-6 3 l1 -7 l-5 -5 l7 -1 z' fill='#9b9b9b'/>"
+            "<path d='M250 110 l2 5 l5 1 l-4 3 l1 5 l-4 -2 l-4 2 l1 -5 l-4 -3 l5 -1 z' fill='#9b9b9b'/>"
+            "<path d='M560 175 l2 5 l5 1 l-4 3 l1 5 l-4 -2 l-4 2 l1 -5 l-4 -3 l5 -1 z' fill='#9b9b9b'/>"
+            "<ellipse cx='340' cy='370' rx='210' ry='50' class='bed'/>"
+            "<path class='ink-soft' d='M140 360 q-8 -34 30 -42 q170 -22 340 0 q38 8 30 42 q-6 30 -50 36 q-150 18 -300 0 q-44 -6 -50 -36 z'/>"
+            "<path class='ink-soft' d='M150 358 q180 24 380 0'/>"
+            "<path class='fur' d='M250 290 q-70 10 -78 56 q-6 40 60 50 q120 16 230 -4 q70 -14 56 -64 q-14 -44 -90 -48 q-24 24 -64 22 q-46 -2 -54 -28 q-8 6 -16 8 z'/>"
+            "<path class='ink' d='M250 292 q-66 12 -74 54 q-6 38 58 48 q116 16 224 -4 q66 -14 54 -60 q-14 -42 -86 -46'/>"
+            "<path class='ink' d='M250 292 q12 -22 44 -22 q34 0 42 26'/>"
+            "<path class='ink' d='M336 296 q12 18 52 16 q44 -2 56 -24'/>"
+            "<path class='ink' d='M444 288 q42 -36 72 -20 q22 12 6 40 q-12 22 -42 28'/>"
+            "<path class='ink-soft' d='M470 282 q24 -14 40 -4'/>"
+            "<path class='ink' d='M250 292 q-30 -16 -34 -44 q-2 -20 16 -26 q20 -6 30 14'/>"
+            "<path class='ink' d='M232 222 q-14 -4 -20 8 q-6 14 8 24'/>"
+            "<circle cx='244' cy='258' r='2.5' fill='#2b2b2b'/>"
+            "<path class='ink-soft' d='M236 256 q8 -5 16 0'/>"
+            "<path class='ink' d='M258 272 q8 6 18 2'/>"
+            "<path class='ink' d='M266 268 q2 6 -2 10'/>"
+            "<circle cx='270' cy='276' r='3' fill='#2b2b2b'/>"
+            "<path class='ink-soft' d='M300 330 q40 10 90 4'/>"
+            "<path class='ink-soft' d='M330 360 q30 6 70 0'/>"
+            "<path class='ink-soft' d='M540 250 q10 -10 0 -20 q-10 -10 0 -20' opacity='0.7'/>"
+            "<path class='ink-soft' d='M556 236 q8 -8 0 -16 q-8 -8 0 -16' opacity='0.5'/>"
+            "<text x='340' y='432' text-anchor='middle' class='cap'>Peach &mdash; rest easy, good girl</text>"
+            "</svg></div>"
+            "</body></html>"
+        );
+    });
+
+    server.onNotFound([&]() {
+        server.sendHeader("Location", "http://192.168.4.1/", true);
+        server.send(302, "text/plain", "");
+    });
+
+    server.on("/save", HTTP_POST, [&]() {
+        String ssid = server.arg("ssid"); ssid.trim();
+        String pass = server.arg("pass"); pass.trim();
+        String host = server.arg("host"); host.trim();
+        int    port = server.arg("port").toInt();
+        // Require BOTH SSID and key. A blank password saves an unjoinable network
+        // and reboots into it — the lockout. This mirrors the form's `required`,
+        // for any client that bypasses browser validation.
+        if (ssid.length() == 0 || pass.length() == 0) {
+            server.send(400, "text/plain",
+                ssid.length() == 0 ? "WiFi name (SSID) required"
+                                   : "WiFi password (network key) required");
+            return;
+        }
+        sPrefs.begin(NVS_NS, false);
+        sPrefs.putString(SSID_KEYS[0], ssid);
+        sPrefs.putString(PASS_KEYS[0], pass);
+        sPrefs.end();
+        // Server target stays ATOMIC: only overwrite when BOTH host and port
+        // are present. Auth is never entered on the open setup AP.
+        if (host.length() > 0 && port > 0) _saveServer(host, port, gSrvUser, gSrvPass);
+        server.send(200, "text/html",
+            "<html><body style='font-family:sans-serif;background:#0a0318;"
+            "color:#e0d4ff;text-align:center;padding:2rem'>"
+            "<h2 style='color:#a855f7'>Saved!</h2>"
+            "<p>Rebooting Dio to join <b>" + ssid + "</b>...</p>"
+            "</body></html>"
+        );
+        delay(1000);
+        ESP.restart();
+    });
+
+    server.begin();
+
+    // Static setup screen so this mode is OBVIOUS instead of looking like a hang.
+    // (The CONNECTING face's "connecting" label read as "stuck connecting".)
+    // Drawn once; the loop below no longer calls face.update(), so it persists.
+    {
+        auto& d = M5StackChan.Display();
+        int cx = d.width() / 2;
+        d.fillScreen(_pcol(8, 6, 20));
+        d.setTextDatum(top_center);
+        d.setTextSize(2); d.setTextColor(_pcol(200, 130, 255), _pcol(8, 6, 20));
+        d.drawString("WiFi Setup", cx, 14);
+        d.setTextSize(1); d.setTextColor(_pcol(215, 200, 245), _pcol(8, 6, 20));
+        d.drawString("On your phone, join WiFi:", cx, 56);
+        d.setTextSize(2); d.setTextColor(_pcol(150, 240, 170), _pcol(8, 6, 20));
+        d.drawString("Dio-Setup", cx, 80);
+        d.setTextSize(1); d.setTextColor(_pcol(215, 200, 245), _pcol(8, 6, 20));
+        d.drawString("then open in a browser:", cx, 124);
+        d.setTextSize(2); d.setTextColor(_pcol(150, 210, 255), _pcol(8, 6, 20));
+        d.drawString("192.168.4.1", cx, 148);
+        d.setTextSize(1); d.setTextColor(_pcol(150, 140, 190), _pcol(8, 6, 20));
+        d.drawString("Enter your WiFi name + key", cx, 198);
+    }
+
+    while (true) {
+        M5StackChan.update();      // servos/touch stay alive
+        dns.processNextRequest();
+        server.handleClient();
+        delay(5);                  // NO face.update() — keep the static setup screen up
+    }
+}
+
+// Settings → WiFi Config entry: enter the existing phone captive portal on demand.
+// _runPortal() never returns — it serves the setup form until /save → ESP.restart().
+void launchWifiPortal() { _runPortal(); }
+
+
 static void wifiSupervisorTick() {
     static int sFailCount = 0;
 
@@ -418,13 +606,14 @@ static void wifiSupervisorTick() {
         sHealthOnline  = false;   // re-probe health once the link comes back
         Serial.println("[wifi] disconnected — will retry");
     }
+    // Iris watchdog: rotate saved slots, retry FOREVER; portal is boot-onboarding
+    // only, never raised on a runtime drop. Back off 15s -> 60s after 8 tries.
     uint32_t now = millis();
-    if (now - sLastReconnect < 15000) return;
+    uint32_t interval = (sFailCount >= 8) ? 60000UL : 15000UL;
+    if (now - sLastReconnect < interval) return;
     sLastReconnect = now;
-    _tryNextNetwork();
-    // After 16 consecutive ticks (~4 min) without connecting, raise portal.
-    // Resets to 0 on any successful connect.
-    if (++sFailCount >= 16) { sFailCount = 0; launchWifiKeyboard(); }
+    if (ESP.getMaxAllocHeap() >= 80000) { _tryNextNetwork(); sFailCount++; }
+    else { WiFi.mode(WIFI_OFF); delay(100); WiFi.mode(WIFI_STA); }
 }
 
 // ── Globals ───────────────────────────────────────────────────────────────────
@@ -638,15 +827,14 @@ void setup() {
     int n = _loadCreds(ssids, passes);
     Serial.printf("[wifi] _loadCreds → n=%d\n", n);
     if (n == 0) {
-        launchWifiKeyboard();  // no creds — blocks until /save → ESP.restart()
+        _runPortal();  // no creds — captive setup portal (Dio-Setup)
     } else {
         // Try each saved network on the boot splash — same screen as "homing
         // servos...". First slot gets the full 12s; extra slots get 8s each.
         d.drawString("connecting wifi...", d.width() / 2, d.height() / 2 + 32);
         for (int slot = 0; slot < n && WiFi.status() != WL_CONNECTED; slot++) {
             Serial.printf("[wifi] boot slot %d: %s\n", slot, ssids[slot].c_str());
-            if (slot > 0) WiFi.disconnect(false);
-            WiFi.begin(ssids[slot].c_str(), passes[slot].c_str());
+            _wifiJoin(ssids[slot].c_str(), passes[slot].c_str());
             int ticks = (slot == 0) ? 120 : 80;
             for (int i = 0; i < ticks && WiFi.status() != WL_CONNECTED; i++) delay(100);
         }
@@ -659,13 +847,10 @@ void setup() {
             _refreshHealthStatus();
             sLastHealth = millis();
         } else {
-            // Couldn't join the saved network at boot → fall straight over to the
-            // phone portal (Dio-Setup) so creds can be re-entered on a real
-            // keyboard. Do NOT sit in the on-board connect loop. (Astro: it was
-            // forgetting to fall over to the web portal.) the on-screen setup never
-            // returns — it serves the form until /save → ESP.restart().
-            Serial.println("[wifi] boot join failed — opening on-screen WiFi setup");
-            launchWifiKeyboard();
+            // All saved networks failed at boot → captive setup portal (onboarding).
+            // Runtime drops are the watchdog's job (retry forever), not this.
+            Serial.println("[wifi] boot join failed — opening Dio-Setup portal");
+            _runPortal();
         }
     }
 

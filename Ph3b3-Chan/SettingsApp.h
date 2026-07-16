@@ -103,7 +103,7 @@ private:
         int row = (ty - ROW_Y0) / ROW_H;
         if (row < 0 || row >= N_ROWS) return;
         switch (row) {
-            case 0: launchWifiKeyboard();                   break;  // on-screen WiFi setup (SSID + key on the touchscreen)
+            case 0: launchWifiPortal();                     break;  // captive setup portal (Dio-Setup: broadcast + on-screen IP)
             case 1: settingsSetMic((gMicIdx + 1) % 3);        break;
             case 2: settingsSetVol((gVolIdx + 1) % 3);        break;
             case 3: settingsSetLed((gLedIdx + 1) % 3); _brightnessPreview(); break;
