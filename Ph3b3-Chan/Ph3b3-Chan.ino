@@ -346,10 +346,10 @@ static void _runPortal() {
             "<p>Enter your WiFi credentials. "
             "Additional networks sync from Ph3b3 after first connect.</p>"
             "<form method='POST' action='/save'>"
-            "<label>SSID</label>"
-            "<input name='ssid' autocomplete='off' autofocus>"
-            "<label>Password</label>"
-            "<input name='pass' type='password'>"
+            "<label>WiFi Name (SSID)</label>"
+            "<input name='ssid' autocomplete='off' autofocus required>"
+            "<label>WiFi Password (network key)</label>"
+            "<input name='pass' type='password' required minlength='8'>"
             "<label>Ph3b3 host</label>"
             "<input name='host' value='" + gSrvHost + "'>"
             "<label>Ph3b3 port</label>"
@@ -411,26 +411,31 @@ static void _runPortal() {
         String pass = server.arg("pass"); pass.trim();
         String host = server.arg("host"); host.trim();
         int    port = server.arg("port").toInt();
-        if (ssid.length() > 0) {
-            sPrefs.begin(NVS_NS, false);
-            sPrefs.putString(SSID_KEYS[0], ssid);
-            sPrefs.putString(PASS_KEYS[0], pass);
-            sPrefs.end();
-            // Server target stays ATOMIC: only overwrite when BOTH host and port
-            // are present. Auth is never entered on the open setup AP.
-            if (host.length() > 0 && port > 0) _saveServer(host, port, gSrvUser, gSrvPass);
-            server.send(200, "text/html",
-                "<html><body style='font-family:sans-serif;background:#0a0318;"
-                "color:#e0d4ff;text-align:center;padding:2rem'>"
-                "<h2 style='color:#a855f7'>Saved!</h2>"
-                "<p>Rebooting Dio...</p>"
-                "</body></html>"
-            );
-            delay(1000);
-            ESP.restart();
-        } else {
-            server.send(400, "text/plain", "SSID required");
+        // Require BOTH SSID and key. A blank password saves an unjoinable network
+        // and reboots into it — the lockout. This mirrors the form's `required`,
+        // for any client that bypasses browser validation.
+        if (ssid.length() == 0 || pass.length() == 0) {
+            server.send(400, "text/plain",
+                ssid.length() == 0 ? "WiFi name (SSID) required"
+                                   : "WiFi password (network key) required");
+            return;
         }
+        sPrefs.begin(NVS_NS, false);
+        sPrefs.putString(SSID_KEYS[0], ssid);
+        sPrefs.putString(PASS_KEYS[0], pass);
+        sPrefs.end();
+        // Server target stays ATOMIC: only overwrite when BOTH host and port
+        // are present. Auth is never entered on the open setup AP.
+        if (host.length() > 0 && port > 0) _saveServer(host, port, gSrvUser, gSrvPass);
+        server.send(200, "text/html",
+            "<html><body style='font-family:sans-serif;background:#0a0318;"
+            "color:#e0d4ff;text-align:center;padding:2rem'>"
+            "<h2 style='color:#a855f7'>Saved!</h2>"
+            "<p>Rebooting Dio to join <b>" + ssid + "</b>...</p>"
+            "</body></html>"
+        );
+        delay(1000);
+        ESP.restart();
     });
 
     server.begin();
