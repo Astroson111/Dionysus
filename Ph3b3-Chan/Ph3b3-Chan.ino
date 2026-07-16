@@ -688,10 +688,19 @@ void setup() {
 
     int n = _loadCreds(ssids, passes);
     Serial.printf("[wifi] _loadCreds → n=%d\n", n);
-    if (n > 0) {
+    if (n == 0) {
+        _runPortal();  // no creds — blocks until /save → ESP.restart()
+    } else {
+        // Try each saved network on the boot splash — same screen as "homing
+        // servos...". First slot gets the full 12s; extra slots get 8s each.
         d.drawString("connecting wifi...", d.width() / 2, d.height() / 2 + 32);
-        WiFi.begin(ssids[0].c_str(), passes[0].c_str());
-        for (int i = 0; i < 120 && WiFi.status() != WL_CONNECTED; i++) delay(100);
+        for (int slot = 0; slot < n && WiFi.status() != WL_CONNECTED; slot++) {
+            Serial.printf("[wifi] boot slot %d: %s\n", slot, ssids[slot].c_str());
+            if (slot > 0) WiFi.disconnect(false);
+            WiFi.begin(ssids[slot].c_str(), passes[slot].c_str());
+            int ticks = (slot == 0) ? 120 : 80;
+            for (int i = 0; i < ticks && WiFi.status() != WL_CONNECTED; i++) delay(100);
+        }
         if (WiFi.status() == WL_CONNECTED) {
             sWifiConnected = true;
             sConnectedAt   = millis();
@@ -705,10 +714,11 @@ void setup() {
             face.setStatusLine(st);   // status word only — on-screen IP:port removed (Astro)
             Serial.printf("[srv] health=%d -> %s\n", hc, st.c_str());
         } else {
-            Serial.println("[wifi] not connected at boot — will retry in loop");
+            // Couldn't join ANY saved network → revert to the WiFi settings page
+            // instead of sitting in Talk frozen on "connecting". (Astro)
+            Serial.println("[wifi] no network joined at boot — opening WiFi settings portal");
+            _runPortal();  // blocks until /save → ESP.restart()
         }
-    } else {
-        _runPortal();  // blocks until /save → ESP.restart()
     }
 
     appMgr.registerApp(&talkApp);     // 0
