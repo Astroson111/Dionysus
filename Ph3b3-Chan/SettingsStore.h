@@ -9,8 +9,8 @@
 //   gMicMagnification → mcfg.magnification in the capture path (TalkApp)
 //   gLedBrightness    → scales the status LED cue (_listenLeds in the .ino)
 //
-// WiFi Config is not a preset — it launches the existing captive portal
-// (launchWifiPortal → _runPortal, which reboots on save).
+// WiFi Config is not a preset — it launches the on-screen WiFi keyboard
+// (launchWifiKeyboard: SSID + key on the touchscreen, connect-first).
 
 // Preset tables (index → applied value). static const = per-TU copy, tiny.
 static const int   SET_VOL_LEVELS[3] = {102, 178, 255};    // Low 40% / Med 70% / High 100% of 255
@@ -55,5 +55,4 @@ void settingsSetMic(int idx);
 void settingsSetLed(int idx);
 void settingsSetLedColor(int idx);
 
-void launchWifiPortal();          // enter the phone captive portal (defined in .ino; reboots on save)
-void launchWifiKeyboard();        // on-screen touch-keyboard WiFi entry (defined in .ino; reboots on save)
+void launchWifiKeyboard();        // on-screen touch-keyboard WiFi entry (defined in .ino; connect-first)

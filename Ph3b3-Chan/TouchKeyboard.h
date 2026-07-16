@@ -48,7 +48,7 @@ inline String tkPrompt(const char* title, bool mask) {
         int hit = -1;
         for (int r = 0; r < 4; r++) {
             int n  = ROWLEN[r] + (r == 3 ? 1 : 0);   // row 3 gets a trailing backspace
-            int x0 = (320 - n * KW) / 2;
+            int x0 = (d.width() - n * KW) / 2;        // width-relative (was hardcoded 320)
             int y  = KB_Y + r * KH;
             for (int c = 0; c < n; c++) {
                 int  kx     = x0 + c * KW;
@@ -70,7 +70,8 @@ inline String tkPrompt(const char* title, bool mask) {
             {"cancel",                  -6, 54},
             {"done",                    -5, 58},
         };
-        int fx = 4;
+        int fx = (d.width() - (54 + 54 + 96 + 54 + 58)) / 2;   // center the function row
+        if (fx < 0) fx = 0;
         for (auto& b : fb) {
             if (draw) key(fx, fy, b.w - 3, b.l, b.a == -5);
             else if (tx >= fx && tx < fx + b.w && ty >= fy && ty < fy + KH) hit = b.a;
@@ -106,6 +107,17 @@ inline String tkPrompt(const char* title, bool mask) {
         if (dirty) { render(); dirty = false; }
         int16_t tx = 0, ty = 0;
         bool touching = d.getTouch(&tx, &ty);
+        // DIAGNOSTIC (serial is dead → the screen is the instrument): show the raw
+        // touch coords top-right whenever the panel reports a touch. If a tap that
+        // looks like it's on a key shows coords that DON'T land in that key's rect,
+        // it's a hit-test/geometry mismatch. Persists on a no-register tap (screen
+        // only repaints when something changes). Remove once the keyboard is proven.
+        if (touching) {
+            d.fillRect(d.width() - 82, 0, 82, 11, col(8, 6, 20));
+            d.setTextDatum(top_right); d.setTextSize(1);
+            d.setTextColor(col(255, 200, 120), col(8, 6, 20));
+            d.drawString(String(tx) + "," + String(ty), d.width() - 2, 1);
+        }
         if (touching && !wasTouch) {
             wasTouch = true;
             int a = keys(false, tx, ty);
