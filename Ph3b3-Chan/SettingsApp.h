@@ -103,7 +103,7 @@ private:
         int row = (ty - ROW_Y0) / ROW_H;
         if (row < 0 || row >= N_ROWS) return;
         switch (row) {
-            case 0: launchWifiKeyboard();                     break;  // on-screen SSID+pass (reboots on save)
+            case 0: launchWifiPortal();                     break;  // captive setup portal (Dio-Setup: broadcast + on-screen IP)
             case 1: settingsSetMic((gMicIdx + 1) % 3);        break;
             case 2: settingsSetVol((gVolIdx + 1) % 3);        break;
             case 3: settingsSetLed((gLedIdx + 1) % 3); _brightnessPreview(); break;
@@ -141,7 +141,7 @@ private:
         d.setTextColor(_col(120, 110, 160), _col(10, 7, 25));
         d.drawString("< swipe left to exit", w / 2, HINT_Y);
 
-        _drawRow(0, "WiFi Setup", "type",                    true);
+        _drawRow(0, "WiFi Setup", "phone",                   true);
         _drawRow(1, "Microphone", SET_MIC_NAMES[gMicIdx],    false);
         _drawRow(2, "Volume",     SET_VOL_NAMES[gVolIdx],    false);
         _drawRow(3, "LED",        SET_LED_NAMES[gLedIdx],    false);

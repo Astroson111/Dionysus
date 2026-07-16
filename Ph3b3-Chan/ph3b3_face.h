@@ -69,8 +69,8 @@ class Ph3b3Face {
     // ── Colors — violet palette tuned for CoreS3 ILI9342 with SC_FACE_BGR ──
     // With SC_FACE_BGR, C(r,g,b) → color565(b,g,r) → display shows (R=b, G=g, B=r).
     // To display target (Rd,Gd,Bd): call C(Bd, Gd, Rd).
-    C_FACE  = C(0x60, 0x10, 0x30);  // display: R=48,  G=16, B=96  → deep violet
-    C_GLOW  = C(0x50, 0x0A, 0x20);  // display: R=32,  G=10, B=80  → dark violet glow
+    C_FACE  = C(0xA0, 0x38, 0x60);  // display: R=96,  G=56, B=160 → lighter violet
+    C_GLOW  = C(0x80, 0x28, 0x48);  // display: R=72,  G=40, B=128 → lighter violet glow
     C_RIM   = C(0xE0, 0x40, 0x90);  // display: R=144, G=64, B=224 → bright violet
     C_EYE   = C(0x32, 0x08, 0x12);  // display: R=18,  G=8,  B=50  → very dark iris
     C_MOUTH = C(0x90, 0x40, 0xE0);  // display: R=224, G=64, B=144 → magenta

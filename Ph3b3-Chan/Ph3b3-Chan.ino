@@ -8,12 +8,12 @@
  *   - WiFi connection managed in main sketch (supervisor tick in loop)
  *   - TalkApp (index 1) fully implemented: mic → /transcribe → /chat → speaker
  *   - ISRG Root X1 + X2 cert bundle for Let's Encrypt TLS
- *   - Credentials synced from /iris/networks after first connect (saved to NVS "sc")
  *
- * First-boot WiFi setup:
- *   Fill in SC_WIFI_SSID / SC_WIFI_PASS below, flash once, connect.
- *   After connecting, Ph3b3's /iris/networks is pulled and saved to NVS —
- *   subsequent boots load from NVS so you can blank these defines again.
+ * WiFi setup:
+ *   Provisioned on-device via the Dio-Setup phone portal (Settings -> WiFi Setup,
+ *   or automatically on no creds / failed join). Creds persist in NVS "sc".
+ *   SC_WIFI_SSID / SC_WIFI_PASS may be baked as a first-boot seed but are normally
+ *   blank — provisioning is done from the portal, not hardcoded.
  *
  * Mode switching: tap the crescent tab (top-left corner) to open the mode overlay.
  *
@@ -37,13 +37,13 @@
 #include <Preferences.h>
 #include <DNSServer.h>
 #include <WebServer.h>
+#include <esp_wifi.h>
 
 #include "ph3b3_face.h"
 #include "AppBase.h"
 #include "AppManager.h"
 #include "CrescentMenu.h"
 #include "SettingsStore.h"
-#include "TouchKeyboard.h"
 #include "TalkApp.h"
 #include "NetworkApp.h"
 #include "KaraokeApp.h"
@@ -112,6 +112,8 @@ static bool     sWifiConnected = false;
 static uint32_t sLastReconnect = 0;
 static bool     sSyncDone      = false;
 static uint32_t sConnectedAt   = 0;
+static bool     sHealthOnline  = false;   // last /health probe reached the server (2xx)
+static uint32_t sLastHealth    = 0;       // millis() of the last /health probe
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -213,6 +215,22 @@ static int _healthCheck() {
     return code;                     // 2xx online; 401/403 denied; <0 no route
 }
 
+// Probe /health and set the on-screen status word. One quick retry so a slow
+// first TLS handshake (marginal association right after WiFi joins) doesn't
+// latch a false "no route". Updates sHealthOnline; returns the word.
+static String _refreshHealthStatus() {
+    int hc = _healthCheck();
+    if (hc < 0) { delay(400); hc = _healthCheck(); }
+    String st = (hc >= 200 && hc < 300) ? "online"
+              : (hc == 401 || hc == 403) ? "denied"
+              : (hc < 0)                  ? "no route"
+              :                             "away";
+    sHealthOnline = (st == "online");
+    face.setStatusLine(st);
+    Serial.printf("[srv] health=%d -> %s\n", hc, st.c_str());
+    return st;
+}
+
 static int _loadCreds(String ssids[], String passes[]) {
     sPrefs.begin(NVS_NS, true);
     bool hasAny = false;
@@ -233,41 +251,25 @@ static int _loadCreds(String ssids[], String passes[]) {
     return n;
 }
 
-static void _syncNetworks() {
-    WiFiClientSecure tls;
-    tls.setInsecure();               // LAN mkcert self-signed cert (Iris lesson)
-    tls.setTimeout(8000);
-    HTTPClient http;
-    http.begin(tls, gSrvHost.c_str(), gSrvPort, "/stackchan/networks", true);
-    http.setAuthorization(gSrvUser.c_str(), gSrvPass.c_str());
-    http.addHeader("X-Ph3b3-Device", "stackchan");
-    http.setTimeout(8000);
-    if (http.GET() != HTTP_CODE_OK) { http.end(); return; }
-    String body = http.getString();
-    http.end();
+// (Server-side network sync removed 2026-07-16 — Dio provisions WiFi on-device
+//  via the Dio-Setup portal; the /stackchan/networks endpoint no longer exists.)
 
-    JsonDocument doc;
-    if (deserializeJson(doc, body)) return;
-    JsonArray nets = doc["networks"];
-    if (!nets) return;
-
-    sPrefs.begin(NVS_NS, false);
-    int count = 0;
-    for (JsonObject n : nets) {
-        if (count >= SC_MAX_NETS) break;
-        const char* s = n["ssid"]; const char* p = n["pass"];
-        if (s && *s) {
-            sPrefs.putString(SSID_KEYS[count], s);
-            sPrefs.putString(PASS_KEYS[count], p ? p : "");
-            count++;
-        }
-    }
-    for (int i = count; i < SC_MAX_NETS; i++) {
-        sPrefs.putString(SSID_KEYS[i], "");
-        sPrefs.putString(PASS_KEYS[i], "");
-    }
-    sPrefs.end();
-    Serial.printf("[wifi] synced %d network(s) from Ph3b3\n", count);
+// Robust WiFi join (Iris pattern): full teardown + PMF-capable connect. Bare
+// WiFi.begin() doesn't free the WPA supplicant buffers on reason 26/32 and can't
+// negotiate PMF-required APs — the likely cause of Dio's flaky association.
+static void _wifiJoin(const char* ssid, const char* pass) {
+    WiFi.mode(WIFI_OFF);
+    delay(400);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);
+    wifi_config_t conf = {};
+    strlcpy((char*)conf.sta.ssid,     ssid, sizeof(conf.sta.ssid));
+    strlcpy((char*)conf.sta.password, pass, sizeof(conf.sta.password));
+    conf.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    conf.sta.pmf_cfg.capable    = true;
+    conf.sta.pmf_cfg.required   = false;
+    esp_wifi_set_config(WIFI_IF_STA, &conf);
+    esp_wifi_connect();
 }
 
 static void _tryNextNetwork() {
@@ -279,16 +281,21 @@ static void _tryNextNetwork() {
     }
     static int slot = 0;
     slot = (slot + 1) % n;
-    Serial.printf("[wifi] trying slot %d: %s\n", slot, ssids[slot].c_str());
-    WiFi.disconnect(false);
-    WiFi.begin(ssids[slot].c_str(), passes[slot].c_str());
+    Serial.printf("[wifi] reconnect slot %d: %s\n", slot, ssids[slot].c_str());
+    _wifiJoin(ssids[slot].c_str(), passes[slot].c_str());
 }
 
-// Captive portal: raised when no creds exist or join keeps failing.
-// Starts softAP "Dio-Setup", serves a one-shot SSID/pass form, writes slot0 in
-// NVS "sc" on /save, then reboots.  After reboot _loadCreds() finds slot0 and
-// joins normally; _syncNetworks() pulls the rest from Ph3b3.
-// This function never returns — portal runs until ESP.restart().
+// Violet palette helper, BGR-aware like the keyboard (styling stays consistent).
+static uint16_t _pcol(uint8_t r, uint8_t g, uint8_t b) {
+    auto& d = M5StackChan.Display();
+#ifdef SC_FACE_BGR
+    return d.color565(b, g, r);
+#else
+    return d.color565(r, g, b);
+#endif
+}
+
+
 static void _runPortal() {
     Serial.println("[wifi] portal — Dio-Setup 192.168.4.1");
     face.setState(Ph3b3Face::CONNECTING);
@@ -328,10 +335,10 @@ static void _runPortal() {
             "<p>Enter your WiFi credentials. "
             "Additional networks sync from Ph3b3 after first connect.</p>"
             "<form method='POST' action='/save'>"
-            "<label>SSID</label>"
-            "<input name='ssid' autocomplete='off' autofocus>"
-            "<label>Password</label>"
-            "<input name='pass' type='password'>"
+            "<label>WiFi Name (SSID)</label>"
+            "<input name='ssid' autocomplete='off' autofocus required>"
+            "<label>WiFi Password (network key)</label>"
+            "<input name='pass' type='password' required minlength='8'>"
             "<label>Ph3b3 host</label>"
             "<input name='host' value='" + gSrvHost + "'>"
             "<label>Ph3b3 port</label>"
@@ -393,36 +400,62 @@ static void _runPortal() {
         String pass = server.arg("pass"); pass.trim();
         String host = server.arg("host"); host.trim();
         int    port = server.arg("port").toInt();
-        if (ssid.length() > 0) {
-            sPrefs.begin(NVS_NS, false);
-            sPrefs.putString(SSID_KEYS[0], ssid);
-            sPrefs.putString(PASS_KEYS[0], pass);
-            sPrefs.end();
-            // Server target stays ATOMIC: only overwrite when BOTH host and port
-            // are present. Auth is never entered on the open setup AP.
-            if (host.length() > 0 && port > 0) _saveServer(host, port, gSrvUser, gSrvPass);
-            server.send(200, "text/html",
-                "<html><body style='font-family:sans-serif;background:#0a0318;"
-                "color:#e0d4ff;text-align:center;padding:2rem'>"
-                "<h2 style='color:#a855f7'>Saved!</h2>"
-                "<p>Rebooting Dio...</p>"
-                "</body></html>"
-            );
-            delay(1000);
-            ESP.restart();
-        } else {
-            server.send(400, "text/plain", "SSID required");
+        // Require BOTH SSID and key. A blank password saves an unjoinable network
+        // and reboots into it — the lockout. This mirrors the form's `required`,
+        // for any client that bypasses browser validation.
+        if (ssid.length() == 0 || pass.length() == 0) {
+            server.send(400, "text/plain",
+                ssid.length() == 0 ? "WiFi name (SSID) required"
+                                   : "WiFi password (network key) required");
+            return;
         }
+        sPrefs.begin(NVS_NS, false);
+        sPrefs.putString(SSID_KEYS[0], ssid);
+        sPrefs.putString(PASS_KEYS[0], pass);
+        sPrefs.end();
+        // Server target stays ATOMIC: only overwrite when BOTH host and port
+        // are present. Auth is never entered on the open setup AP.
+        if (host.length() > 0 && port > 0) _saveServer(host, port, gSrvUser, gSrvPass);
+        server.send(200, "text/html",
+            "<html><body style='font-family:sans-serif;background:#0a0318;"
+            "color:#e0d4ff;text-align:center;padding:2rem'>"
+            "<h2 style='color:#a855f7'>Saved!</h2>"
+            "<p>Rebooting Dio to join <b>" + ssid + "</b>...</p>"
+            "</body></html>"
+        );
+        delay(1000);
+        ESP.restart();
     });
 
     server.begin();
 
+    // Static setup screen so this mode is OBVIOUS instead of looking like a hang.
+    // (The CONNECTING face's "connecting" label read as "stuck connecting".)
+    // Drawn once; the loop below no longer calls face.update(), so it persists.
+    {
+        auto& d = M5StackChan.Display();
+        int cx = d.width() / 2;
+        d.fillScreen(_pcol(8, 6, 20));
+        d.setTextDatum(top_center);
+        d.setTextSize(2); d.setTextColor(_pcol(200, 130, 255), _pcol(8, 6, 20));
+        d.drawString("WiFi Setup", cx, 14);
+        d.setTextSize(1); d.setTextColor(_pcol(215, 200, 245), _pcol(8, 6, 20));
+        d.drawString("On your phone, join WiFi:", cx, 56);
+        d.setTextSize(2); d.setTextColor(_pcol(150, 240, 170), _pcol(8, 6, 20));
+        d.drawString("Dio-Setup", cx, 80);
+        d.setTextSize(1); d.setTextColor(_pcol(215, 200, 245), _pcol(8, 6, 20));
+        d.drawString("then open in a browser:", cx, 124);
+        d.setTextSize(2); d.setTextColor(_pcol(150, 210, 255), _pcol(8, 6, 20));
+        d.drawString("192.168.4.1", cx, 148);
+        d.setTextSize(1); d.setTextColor(_pcol(150, 140, 190), _pcol(8, 6, 20));
+        d.drawString("Enter your WiFi name + key", cx, 198);
+    }
+
     while (true) {
-        M5StackChan.update();
+        M5StackChan.update();      // servos/touch stay alive
         dns.processNextRequest();
         server.handleClient();
-        face.update();
-        delay(5);
+        delay(5);                  // NO face.update() — keep the static setup screen up
     }
 }
 
@@ -430,29 +463,6 @@ static void _runPortal() {
 // _runPortal() never returns — it serves the setup form until /save → ESP.restart().
 void launchWifiPortal() { _runPortal(); }
 
-// Settings → WiFi Setup (on-screen): type SSID + password on the touchscreen, save
-// to NVS slot 0, reboot to join. No phone needed. Cancel on the SSID screen → no
-// change (returns to Settings). Reuses the same NVS slot + join path as the portal.
-void launchWifiKeyboard() {
-    String ssid = tkPrompt("Enter WiFi name (SSID):", false);
-    if (ssid.length() == 0) return;                    // cancelled
-    String pass = tkPrompt("Enter WiFi password:", true);
-
-    sPrefs.begin(NVS_NS, false);
-    sPrefs.putString(SSID_KEYS[0], ssid);
-    sPrefs.putString(PASS_KEYS[0], pass);
-    sPrefs.end();
-
-    auto& d = M5StackChan.Display();
-    d.fillScreen(TFT_BLACK);
-    d.setTextDatum(middle_center);
-    d.setTextSize(2); d.setTextColor(TFT_CYAN, TFT_BLACK);
-    d.drawString("Saved!", d.width() / 2, d.height() / 2 - 12);
-    d.setTextSize(1); d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.drawString(("Rebooting to join " + ssid).c_str(), d.width() / 2, d.height() / 2 + 16);
-    delay(1200);
-    ESP.restart();
-}
 
 static void wifiSupervisorTick() {
     static int sFailCount = 0;
@@ -465,8 +475,14 @@ static void wifiSupervisorTick() {
             Serial.printf("[wifi] connected: %s\n", WiFi.localIP().toString().c_str());
         }
         if (!sSyncDone && millis() - sConnectedAt > 10000) {
-            sSyncDone = true;
-            _syncNetworks();
+            sSyncDone = true;   // connection settled (gates the health re-probe below)
+        }
+        // Recover a stale non-online status word: re-probe /health every 20s ONLY
+        // while not online. Stops once online — no probe cost or face stutter when
+        // healthy. Covers a transient failure latched by the one-shot boot probe.
+        if (sSyncDone && !sHealthOnline && millis() - sLastHealth > 20000) {
+            sLastHealth = millis();
+            _refreshHealthStatus();
         }
         return;
     }
@@ -474,15 +490,17 @@ static void wifiSupervisorTick() {
         sWifiConnected = false;
         sSyncDone      = false;
         sConnectedAt   = 0;
+        sHealthOnline  = false;   // re-probe health once the link comes back
         Serial.println("[wifi] disconnected — will retry");
     }
+    // Iris watchdog: rotate saved slots, retry FOREVER; portal is boot-onboarding
+    // only, never raised on a runtime drop. Back off 15s -> 60s after 8 tries.
     uint32_t now = millis();
-    if (now - sLastReconnect < 15000) return;
+    uint32_t interval = (sFailCount >= 8) ? 60000UL : 15000UL;
+    if (now - sLastReconnect < interval) return;
     sLastReconnect = now;
-    _tryNextNetwork();
-    // After 16 consecutive ticks (~4 min) without connecting, raise portal.
-    // Resets to 0 on any successful connect.
-    if (++sFailCount >= 16) { sFailCount = 0; _runPortal(); }
+    if (ESP.getMaxAllocHeap() >= 80000) { _tryNextNetwork(); sFailCount++; }
+    else { WiFi.mode(WIFI_OFF); delay(100); WiFi.mode(WIFI_STA); }
 }
 
 // ── Globals ───────────────────────────────────────────────────────────────────
@@ -658,10 +676,17 @@ void setup() {
     d.drawString("homing servos...", d.width() / 2, d.height() / 2 + 16);
 
     gentleHome();
+    // Brownout mitigation (audit #2 / README landmine f3767ae): once homed, drop
+    // servo HOLD current so it isn't stacked on the WiFi-connect current spike +
+    // LED ring — the AXP2101 brown-out that stops WiFi joining on battery. The
+    // head simply rests (same as the power-off state) until re-engaged after the
+    // WiFi step below. Do NOT add torque to "fix" homing — more torque = more
+    // current = worse brown-out.
+    M5StackChan.Motion.setTorqueEnabled(false);
     randomSeed(micros());   // vary scan waypoints across boots
     Serial.println("[rung4] homed");
 
-    // Init face before WiFi so _runPortal() can animate while waiting for creds.
+    // Init face before WiFi so the on-screen setup can animate while waiting for creds.
     face.begin();
     face.setStatusVisible(false);   // face-only mode: state via expression, no text
     face.setCrescentTabVisible(true);  // corner crescent is the only control affordance
@@ -684,33 +709,46 @@ void setup() {
     _loadServer();   // atomic server record — seeds NVS on first boot, else reads it
     settingsLoad();  // Volume / Mic / LED presets from NVS (seeds defaults on first boot)
     face.setStatusVisible(true);
-    face.setStatusLine(gSrvHost + ":" + String(gSrvPort));   // TARGET LINE — no blind config
+    face.setStatusLine("connecting");   // on-screen IP:port removed (Astro)
 
     int n = _loadCreds(ssids, passes);
     Serial.printf("[wifi] _loadCreds → n=%d\n", n);
-    if (n > 0) {
+    if (n == 0) {
+        _runPortal();  // no creds — captive setup portal (Dio-Setup)
+    } else {
+        // Try each saved network on the boot splash — same screen as "homing
+        // servos...". First slot gets the full 12s; extra slots get 8s each.
         d.drawString("connecting wifi...", d.width() / 2, d.height() / 2 + 32);
-        WiFi.begin(ssids[0].c_str(), passes[0].c_str());
-        for (int i = 0; i < 120 && WiFi.status() != WL_CONNECTED; i++) delay(100);
+        for (int slot = 0; slot < n && WiFi.status() != WL_CONNECTED; slot++) {
+            Serial.printf("[wifi] boot slot %d: %s\n", slot, ssids[slot].c_str());
+            _wifiJoin(ssids[slot].c_str(), passes[slot].c_str());
+            int ticks = (slot == 0) ? 120 : 80;
+            for (int i = 0; i < ticks && WiFi.status() != WL_CONNECTED; i++) delay(100);
+        }
         if (WiFi.status() == WL_CONNECTED) {
             sWifiConnected = true;
             sConnectedAt   = millis();
             Serial.printf("[wifi] connected: %s\n", WiFi.localIP().toString().c_str());
-            // Boot health probe → cause-differentiated status + target (Iris lesson)
-            int hc = _healthCheck();
-            String tgt = gSrvHost + ":" + String(gSrvPort);
-            String st = (hc >= 200 && hc < 300) ? ("online "   + tgt)
-                      : (hc == 401 || hc == 403) ? ("denied "   + tgt)
-                      : (hc < 0)                  ? ("no route " + tgt)
-                      :                             ("away "     + tgt);
-            face.setStatusLine(st);
-            Serial.printf("[srv] health=%d -> %s\n", hc, st.c_str());
+            // Boot health probe → status word. Refreshed in the loop until online
+            // so a transient hiccup here doesn't stick. (Iris lesson)
+            _refreshHealthStatus();
+            sLastHealth = millis();
         } else {
-            Serial.println("[wifi] not connected at boot — will retry in loop");
+            // All saved networks failed at boot → captive setup portal (onboarding).
+            // Runtime drops are the watchdog's job (retry forever), not this.
+            Serial.println("[wifi] boot join failed — opening Dio-Setup portal");
+            _runPortal();
         }
-    } else {
-        _runPortal();  // blocks until /save → ESP.restart()
     }
+
+    // WiFi current spike is past — re-engage the servos for the idle scan.
+    // autoAngleSync so torque springs gently from the rested position (no snap),
+    // then ease back to neutral. On battery this lifts fine; USB-only the tilt may
+    // stay low (documented current limit, landmine f3767ae) — not a fault.
+    M5StackChan.Motion.setAutoAngleSyncEnabled(true);
+    M5StackChan.Motion.setTorqueEnabled(true);
+    M5StackChan.Motion.moveY(TILT_HOME, 50);
+    M5StackChan.Motion.moveX(0, 50);
 
     appMgr.registerApp(&talkApp);     // 0
     appMgr.registerApp(&networkApp);  // 1
