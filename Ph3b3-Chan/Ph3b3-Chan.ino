@@ -112,6 +112,8 @@ static bool     sWifiConnected = false;
 static uint32_t sLastReconnect = 0;
 static bool     sSyncDone      = false;
 static uint32_t sConnectedAt   = 0;
+static bool     sHealthOnline  = false;   // last /health probe reached the server (2xx)
+static uint32_t sLastHealth    = 0;       // millis() of the last /health probe
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -211,6 +213,22 @@ static int _healthCheck() {
     int code = http.GET();
     http.end();
     return code;                     // 2xx online; 401/403 denied; <0 no route
+}
+
+// Probe /health and set the on-screen status word. One quick retry so a slow
+// first TLS handshake (marginal association right after WiFi joins) doesn't
+// latch a false "no route". Updates sHealthOnline; returns the word.
+static String _refreshHealthStatus() {
+    int hc = _healthCheck();
+    if (hc < 0) { delay(400); hc = _healthCheck(); }
+    String st = (hc >= 200 && hc < 300) ? "online"
+              : (hc == 401 || hc == 403) ? "denied"
+              : (hc < 0)                  ? "no route"
+              :                             "away";
+    sHealthOnline = (st == "online");
+    face.setStatusLine(st);
+    Serial.printf("[srv] health=%d -> %s\n", hc, st.c_str());
+    return st;
 }
 
 static int _loadCreds(String ssids[], String passes[]) {
@@ -468,12 +486,20 @@ static void wifiSupervisorTick() {
             sSyncDone = true;
             _syncNetworks();
         }
+        // Recover a stale non-online status word: re-probe /health every 20s ONLY
+        // while not online. Stops once online — no probe cost or face stutter when
+        // healthy. Covers a transient failure latched by the one-shot boot probe.
+        if (sSyncDone && !sHealthOnline && millis() - sLastHealth > 20000) {
+            sLastHealth = millis();
+            _refreshHealthStatus();
+        }
         return;
     }
     if (sWifiConnected) {
         sWifiConnected = false;
         sSyncDone      = false;
         sConnectedAt   = 0;
+        sHealthOnline  = false;   // re-probe health once the link comes back
         Serial.println("[wifi] disconnected — will retry");
     }
     uint32_t now = millis();
@@ -705,14 +731,10 @@ void setup() {
             sWifiConnected = true;
             sConnectedAt   = millis();
             Serial.printf("[wifi] connected: %s\n", WiFi.localIP().toString().c_str());
-            // Boot health probe → cause-differentiated status + target (Iris lesson)
-            int hc = _healthCheck();
-            String st = (hc >= 200 && hc < 300) ? "online"
-                      : (hc == 401 || hc == 403) ? "denied"
-                      : (hc < 0)                  ? "no route"
-                      :                             "away";
-            face.setStatusLine(st);   // status word only — on-screen IP:port removed (Astro)
-            Serial.printf("[srv] health=%d -> %s\n", hc, st.c_str());
+            // Boot health probe → status word. Refreshed in the loop until online
+            // so a transient hiccup here doesn't stick. (Iris lesson)
+            _refreshHealthStatus();
+            sLastHealth = millis();
         } else {
             // Couldn't join ANY saved network → revert to the WiFi settings page
             // instead of sitting in Talk frozen on "connecting". (Astro)
