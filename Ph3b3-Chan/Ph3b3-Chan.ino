@@ -455,6 +455,20 @@ void launchWifiKeyboard() {
     String ssid = tkPrompt("Enter WiFi name (SSID):", false);
     if (ssid.length() == 0) return;                    // cancelled
     String pass = tkPrompt("Enter WiFi password:", true);
+    // GUARD: a blank password saves an unjoinable SSID and reboots into it — the
+    // exact loop that locked her out and needed a reflash to escape. Treat an
+    // empty password (cancel, or nothing typed) as "don't save", like the SSID
+    // guard above. (Open/no-password networks aren't offered from this menu.)
+    if (pass.length() == 0) {
+        auto& dd = M5StackChan.Display();
+        dd.fillScreen(TFT_BLACK);
+        dd.setTextDatum(middle_center);
+        dd.setTextSize(1); dd.setTextColor(TFT_ORANGE, TFT_BLACK);
+        dd.drawString("No password entered - not saved.", dd.width() / 2, dd.height() / 2 - 6);
+        dd.drawString("WiFi unchanged.",                 dd.width() / 2, dd.height() / 2 + 10);
+        delay(1600);
+        return;
+    }
 
     sPrefs.begin(NVS_NS, false);
     sPrefs.putString(SSID_KEYS[0], ssid);
