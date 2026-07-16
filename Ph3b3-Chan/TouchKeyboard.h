@@ -25,9 +25,11 @@ inline String tkPrompt(const char* title, bool mask) {
     const int  ROWLEN[4] = {10, 10, 9, 7};
     const int  KW = 30, KH = 34, KB_Y = 52;
 
-    String text  = "";
-    bool   shift = false;
-    int    page  = 0;   // 0 = letters, 1 = symbols
+    String   text      = "";
+    bool     shift     = false;
+    int      page      = 0;      // 0 = letters, 1 = symbols
+    uint32_t lastKeyMs = 0;      // password reveal: when the latest char was typed
+    bool     reveal    = false;  // password reveal: show the latest char in the clear
 
     auto key = [&](int x, int y, int w, const char* lbl, bool accent) {
         d.fillRoundRect(x, y, w, KH - 3, 4, accent ? col(40, 22, 80) : col(22, 14, 46));
@@ -85,7 +87,11 @@ inline String tkPrompt(const char* title, bool mask) {
         d.drawString(title, 8, 5);
         d.drawRoundRect(6, 20, 308, 24, 4, col(90, 60, 170));
         String shown = text;
-        if (mask) { shown = ""; for (int i = 0; i < (int)text.length(); i++) shown += '*'; }
+        if (mask) {                                  // mask all but the just-typed char
+            shown = "";
+            int n = (int)text.length();
+            for (int i = 0; i < n; i++) shown += (reveal && i == n - 1) ? text[i] : '*';
+        }
         d.setTextDatum(middle_left);
         d.setTextColor(col(235, 225, 255), col(8, 6, 20));
         d.drawString(shown.c_str(), 12, 32);
@@ -95,16 +101,21 @@ inline String tkPrompt(const char* title, bool mask) {
     bool wasTouch = false, dirty = true;
     for (;;) {
         M5StackChan.update();
+        // Password reveal: keep the latest char visible ~1s, then re-mask it.
+        if (mask && reveal && millis() - lastKeyMs >= 1000) { reveal = false; dirty = true; }
         if (dirty) { render(); dirty = false; }
         int16_t tx = 0, ty = 0;
         bool touching = d.getTouch(&tx, &ty);
         if (touching && !wasTouch) {
             wasTouch = true;
             int a = keys(false, tx, ty);
-            if (a >= 32)        { text += (char)a; if (shift) shift = false; dirty = true; }
-            else if (a == -2)   { if (text.length()) text.remove(text.length() - 1); dirty = true; }
+            if (a >= 32)        { text += (char)a; if (shift) shift = false;
+                                  if (mask) { reveal = true; lastKeyMs = millis(); } dirty = true; }
+            else if (a == -2)   { if (text.length()) text.remove(text.length() - 1);
+                                  reveal = false; dirty = true; }
             else if (a == -3)   { shift = !shift; dirty = true; }
-            else if (a == -4)   { text += ' '; dirty = true; }
+            else if (a == -4)   { text += ' ';
+                                  if (mask) { reveal = true; lastKeyMs = millis(); } dirty = true; }
             else if (a == -7)   { page = page ? 0 : 1; dirty = true; }
             else if (a == -5)   { return text; }
             else if (a == -6)   { return String(); }
