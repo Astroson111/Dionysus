@@ -844,16 +844,13 @@ void setup() {
             _refreshHealthStatus();
             sLastHealth = millis();
         } else {
-            // Didn't join inside the boot window — but DON'T portal yet. Dio often
-            // joins a moment later via wifiSupervisorTick (marginal AP / slow DHCP):
-            // from the user's side she's "connected the entire time", and jumping
-            // straight to Dio-Setup would be a false alarm. Fall through to Talk
-            // (usable) with the word on "connecting"; the supervisor retries, heals
-            // the word to "online" the moment it connects, and escalates to the
-            // portal only after ~4 min of total failure (sFailCount>=16). That
-            // still honours "revert to WiFi settings if it truly can't join."
-            face.setStatusLine("connecting");
-            Serial.println("[wifi] not joined in boot window — supervisor will retry + heal status");
+            // Couldn't join the saved network at boot → fall straight over to the
+            // phone portal (Dio-Setup) so creds can be re-entered on a real
+            // keyboard. Do NOT sit in the on-board connect loop. (Astro: it was
+            // forgetting to fall over to the web portal.) _runPortal() never
+            // returns — it serves the form until /save → ESP.restart().
+            Serial.println("[wifi] boot join failed — falling over to Dio-Setup web portal");
+            _runPortal();
         }
     }
 
