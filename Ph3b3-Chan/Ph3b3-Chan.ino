@@ -307,6 +307,8 @@ static void _tryNextNetwork() {
 // NVS "sc" on /save, then reboots.  After reboot _loadCreds() finds slot0 and
 // joins normally; _syncNetworks() pulls the rest from Ph3b3.
 // This function never returns — portal runs until ESP.restart().
+static uint16_t _pcol(uint8_t r, uint8_t g, uint8_t b);   // violet helper (defined below)
+
 static void _runPortal() {
     Serial.println("[wifi] portal — Dio-Setup 192.168.4.1");
     face.setState(Ph3b3Face::CONNECTING);
@@ -440,12 +442,33 @@ static void _runPortal() {
 
     server.begin();
 
+    // Static setup screen so this mode is OBVIOUS instead of looking like a hang.
+    // (The CONNECTING face's "connecting" label read as "stuck connecting".)
+    // Drawn once; the loop below no longer calls face.update(), so it persists.
+    {
+        auto& d = M5StackChan.Display();
+        int cx = d.width() / 2;
+        d.fillScreen(_pcol(8, 6, 20));
+        d.setTextDatum(top_center);
+        d.setTextSize(2); d.setTextColor(_pcol(200, 130, 255), _pcol(8, 6, 20));
+        d.drawString("WiFi Setup", cx, 14);
+        d.setTextSize(1); d.setTextColor(_pcol(215, 200, 245), _pcol(8, 6, 20));
+        d.drawString("On your phone, join WiFi:", cx, 56);
+        d.setTextSize(2); d.setTextColor(_pcol(150, 240, 170), _pcol(8, 6, 20));
+        d.drawString("Dio-Setup", cx, 80);
+        d.setTextSize(1); d.setTextColor(_pcol(215, 200, 245), _pcol(8, 6, 20));
+        d.drawString("then open in a browser:", cx, 124);
+        d.setTextSize(2); d.setTextColor(_pcol(150, 210, 255), _pcol(8, 6, 20));
+        d.drawString("192.168.4.1", cx, 148);
+        d.setTextSize(1); d.setTextColor(_pcol(150, 140, 190), _pcol(8, 6, 20));
+        d.drawString("Enter your WiFi name + key", cx, 198);
+    }
+
     while (true) {
-        M5StackChan.update();
+        M5StackChan.update();      // servos/touch stay alive
         dns.processNextRequest();
         server.handleClient();
-        face.update();
-        delay(5);
+        delay(5);                  // NO face.update() — keep the static setup screen up
     }
 }
 
