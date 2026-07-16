@@ -698,6 +698,13 @@ void setup() {
     d.drawString("homing servos...", d.width() / 2, d.height() / 2 + 16);
 
     gentleHome();
+    // Brownout mitigation (audit #2 / README landmine f3767ae): once homed, drop
+    // servo HOLD current so it isn't stacked on the WiFi-connect current spike +
+    // LED ring — the AXP2101 brown-out that stops WiFi joining on battery. The
+    // head simply rests (same as the power-off state) until re-engaged after the
+    // WiFi step below. Do NOT add torque to "fix" homing — more torque = more
+    // current = worse brown-out.
+    M5StackChan.Motion.setTorqueEnabled(false);
     randomSeed(micros());   // vary scan waypoints across boots
     Serial.println("[rung4] homed");
 
@@ -762,6 +769,15 @@ void setup() {
             Serial.println("[wifi] not joined in boot window — supervisor will retry + heal status");
         }
     }
+
+    // WiFi current spike is past — re-engage the servos for the idle scan.
+    // autoAngleSync so torque springs gently from the rested position (no snap),
+    // then ease back to neutral. On battery this lifts fine; USB-only the tilt may
+    // stay low (documented current limit, landmine f3767ae) — not a fault.
+    M5StackChan.Motion.setAutoAngleSyncEnabled(true);
+    M5StackChan.Motion.setTorqueEnabled(true);
+    M5StackChan.Motion.moveY(TILT_HOME, 50);
+    M5StackChan.Motion.moveX(0, 50);
 
     appMgr.registerApp(&talkApp);     // 0
     appMgr.registerApp(&networkApp);  // 1
