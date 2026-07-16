@@ -8,12 +8,12 @@
  *   - WiFi connection managed in main sketch (supervisor tick in loop)
  *   - TalkApp (index 1) fully implemented: mic → /transcribe → /chat → speaker
  *   - ISRG Root X1 + X2 cert bundle for Let's Encrypt TLS
- *   - Credentials synced from /iris/networks after first connect (saved to NVS "sc")
  *
- * First-boot WiFi setup:
- *   Fill in SC_WIFI_SSID / SC_WIFI_PASS below, flash once, connect.
- *   After connecting, Ph3b3's /iris/networks is pulled and saved to NVS —
- *   subsequent boots load from NVS so you can blank these defines again.
+ * WiFi setup:
+ *   Provisioned on-device via the Dio-Setup phone portal (Settings -> WiFi Setup,
+ *   or automatically on no creds / failed join). Creds persist in NVS "sc".
+ *   SC_WIFI_SSID / SC_WIFI_PASS may be baked as a first-boot seed but are normally
+ *   blank — provisioning is done from the portal, not hardcoded.
  *
  * Mode switching: tap the crescent tab (top-left corner) to open the mode overlay.
  *
@@ -251,42 +251,8 @@ static int _loadCreds(String ssids[], String passes[]) {
     return n;
 }
 
-static void _syncNetworks() {
-    WiFiClientSecure tls;
-    tls.setInsecure();               // LAN mkcert self-signed cert (Iris lesson)
-    tls.setTimeout(8000);
-    HTTPClient http;
-    http.begin(tls, gSrvHost.c_str(), gSrvPort, "/stackchan/networks", true);
-    http.setAuthorization(gSrvUser.c_str(), gSrvPass.c_str());
-    http.addHeader("X-Ph3b3-Device", "stackchan");
-    http.setTimeout(8000);
-    if (http.GET() != HTTP_CODE_OK) { http.end(); return; }
-    String body = http.getString();
-    http.end();
-
-    JsonDocument doc;
-    if (deserializeJson(doc, body)) return;
-    JsonArray nets = doc["networks"];
-    if (!nets) return;
-
-    sPrefs.begin(NVS_NS, false);
-    int count = 0;
-    for (JsonObject n : nets) {
-        if (count >= SC_MAX_NETS) break;
-        const char* s = n["ssid"]; const char* p = n["pass"];
-        if (s && *s) {
-            sPrefs.putString(SSID_KEYS[count], s);
-            sPrefs.putString(PASS_KEYS[count], p ? p : "");
-            count++;
-        }
-    }
-    for (int i = count; i < SC_MAX_NETS; i++) {
-        sPrefs.putString(SSID_KEYS[i], "");
-        sPrefs.putString(PASS_KEYS[i], "");
-    }
-    sPrefs.end();
-    Serial.printf("[wifi] synced %d network(s) from Ph3b3\n", count);
-}
+// (Server-side network sync removed 2026-07-16 — Dio provisions WiFi on-device
+//  via the Dio-Setup portal; the /stackchan/networks endpoint no longer exists.)
 
 static void _tryNextNetwork() {
     String ssids[SC_MAX_NETS], passes[SC_MAX_NETS];
@@ -305,7 +271,7 @@ static void _tryNextNetwork() {
 // Captive portal: raised when no creds exist or join keeps failing.
 // Starts softAP "Dio-Setup", serves a one-shot SSID/pass form, writes slot0 in
 // NVS "sc" on /save, then reboots.  After reboot _loadCreds() finds slot0 and
-// joins normally; _syncNetworks() pulls the rest from Ph3b3.
+// joins normally.
 // This function never returns — portal runs until ESP.restart().
 static uint16_t _pcol(uint8_t r, uint8_t g, uint8_t b);   // violet helper (defined below)
 
@@ -607,8 +573,7 @@ static void wifiSupervisorTick() {
             Serial.printf("[wifi] connected: %s\n", WiFi.localIP().toString().c_str());
         }
         if (!sSyncDone && millis() - sConnectedAt > 10000) {
-            sSyncDone = true;
-            _syncNetworks();
+            sSyncDone = true;   // connection settled (gates the health re-probe below)
         }
         // Recover a stale non-online status word: re-probe /health every 20s ONLY
         // while not online. Stops once online — no probe cost or face stutter when
