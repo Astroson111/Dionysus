@@ -220,12 +220,20 @@ public:
                 _pttSamples += chunk;
 
                 uint32_t elapsed = millis() - _recStartMs;
-                if (elapsed < VAD_CALIBRATE_MS) {
-                    _noiseAccum += rms * rms;
-                    _noiseSamples++;
-                } else if (_noiseFloor == 0.0f && _noiseSamples > 0) {
-                    _noiseFloor = max(VAD_FLOOR_MIN,
-                                     sqrtf(_noiseAccum / _noiseSamples) * VAD_THRESH_MULT);
+                if (_noiseFloor == 0.0f) {
+                    if (_awaitFloor > 0.0f) {
+                        // Wake path: onset already fired, so the first 200ms of THIS
+                        // recording is speech, not ambient — calibrating on it would
+                        // over-estimate the floor and endpoint too eagerly. Reuse the
+                        // true ambient measured during AWAITING instead.
+                        _noiseFloor = max(VAD_FLOOR_MIN, _awaitFloor * VAD_THRESH_MULT);
+                    } else if (elapsed < VAD_CALIBRATE_MS) {
+                        _noiseAccum += rms * rms;   // tap-from-idle path: no prior ambient,
+                        _noiseSamples++;            // so measure it from the pre-speech head
+                    } else if (_noiseSamples > 0) {
+                        _noiseFloor = max(VAD_FLOOR_MIN,
+                                         sqrtf(_noiseAccum / _noiseSamples) * VAD_THRESH_MULT);
+                    }
                 }
                 if (_noiseFloor > 0.0f && elapsed >= VAD_MIN_MS) {
                     if (rms < _noiseFloor) { if (_silenceStartMs == 0) _silenceStartMs = millis(); }
@@ -313,13 +321,16 @@ private:
     // gate at ~1730). Calibrate via /transcribe [DBG-MIC]: want rms ~2000, peak < ~30000.
     static constexpr int      JUNK_MIN_LEN          = 2;      // transcript chars below this → noise
     static constexpr int      PTT_RATE      = 16000;
-    static constexpr int      PTT_MAX       = PTT_RATE * 12;  // 12s hard cap = 384 KB PSRAM
+    static constexpr int      PTT_MAX       = PTT_RATE * 30;  // 30s hard cap = 960 KB PSRAM (energy-endpointed; rarely reached)
     static constexpr int      CHUNK_SAMP    = 2048;           // ~93 ms @ 22050 Hz; larger = fewer gaps
-    // VAD consts — millis()-based so timing is correct regardless of M5.Mic.record() blocking
-    static constexpr uint32_t VAD_CALIBRATE_MS = 200;    // noise floor window
-    static constexpr uint32_t VAD_MIN_MS       = 600;    // minimum recording before VAD fires
-    static constexpr uint32_t VAD_SILENCE_MS   = 700;    // 700ms: was 1800 (laggy) -> 900 (still long) -> 500 (clipped natural pauses) -> 700, tuned for hesitant first-time speakers at the public demo.
-    static constexpr uint32_t VAD_MAX_MS       = 12000;  // hard time cap (backup for PTT_MAX)
+    // VAD consts — millis()-based so timing is correct regardless of M5.Mic.record() blocking.
+    // Endpointing is energy-based: capture ends when rolling RMS stays below the
+    // ambient-calibrated threshold for VAD_SILENCE_MS (the hangover), not on a fixed
+    // duration. VAD_MAX_MS is only a runaway backstop (constant noise / never-silent room).
+    static constexpr uint32_t VAD_CALIBRATE_MS = 200;    // ambient noise-floor window (tap path; wake path reuses _awaitFloor)
+    static constexpr uint32_t VAD_MIN_MS       = 1000;   // min capture before VAD can end (≥1s floor)
+    static constexpr uint32_t VAD_SILENCE_MS   = 1100;   // end-of-utterance hangover: silence this long → done. 1100ms holds through natural mid-sentence pauses (>0.8s) yet ends ~1.1s after speech. History: 1800(laggy)->900->500(clipped pauses)->700(demo)->1100(long-utterance brief).
+    static constexpr uint32_t VAD_MAX_MS       = 30000;  // hard runaway backstop (constant-noise room); normal end is energy-based
     static constexpr float    VAD_THRESH_MULT  = 5.0f;   // threshold = noise_floor × this (was 3.0 — ambient spikes kept resetting window)
     static constexpr float    VAD_FLOOR_MIN    = 0.003f; // abs. minimum threshold
     // Always-listening onset detection
