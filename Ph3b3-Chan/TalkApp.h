@@ -23,6 +23,12 @@ extern String gSrvPass;
 // A head-pat is an activity signal that keeps her awake (feeds the dead-air exit).
 extern volatile uint32_t gLastPetMs;
 
+// Native photo loop: set while the camera holds the LCD (see ph3b3_face.h), and
+// the .ino bridge that captures a frame, shows it, and POSTs it to Nyx. Returns
+// true if the frame was posted (then g_faceOwnedByCamera stays set until cleared).
+extern volatile bool g_faceOwnedByCamera;
+extern bool camVisionCapture();
+
 // ── TalkApp — full Ph3b3 voice round-trip ────────────────────────────────────
 //
 // Flow:  tap screen → LISTENING (record) → release or 5s max → THINKING
@@ -343,6 +349,7 @@ private:
     bool     _inConversation  = false;
     uint32_t _convLastValidMs = 0;   // millis() of last successful /chat; idle clock measures from here
     bool     _exitAfterTurn   = false; // set when exit word detected — end after current SPEAK
+    bool     _visionTurn      = false; // Nyx flagged this utterance for Dio's own camera (native photo loop)
     // Always-listening state
     float    _awaitFloor    = 0.0f;
     float    _awaitAccum    = 0.0f;
@@ -554,12 +561,17 @@ private:
         heap_caps_free(jbuf); jbuf = nullptr;
 
         _heardText = "";
+        _visionTurn = false;
         if (code == HTTP_CODE_OK) {
             String body = _http.getString();
             JsonDocument doc;
             deserializeJson(doc, body);
             const char* t = doc["text"];
             if (t && *t) _heardText = String(t);
+            // Nyx routes vision intent server-side; "camera":"dio" means this
+            // utterance goes to HER own camera → run the native photo loop.
+            const char* cam = doc["camera"];
+            _visionTurn = (cam && strcmp(cam, "dio") == 0);
         }
         _http.end();  // keeps _tls alive if server returned Connection: keep-alive
         Serial.printf("[talk] transcribe=%d heard='%s'\n", code, _heardText.c_str());
@@ -592,8 +604,22 @@ private:
         // Exit phrase detection — "goodbye" + Phoebe-name variant required; bare "goodbye" stays in loop
         _exitAfterTurn = _isFarewellToName(_heardText);
 
-        face.setState(Ph3b3Face::THINKING);
-        face.update();
+        if (_visionTurn) {
+            // Native photo loop: capture on HER camera, show it on the LCD, POST to
+            // Nyx — all BEFORE /chat, so look() consumes this fresh push instead of
+            // pulling :8080. Capture+draw run before any TX (brownout-safe). On
+            // success the photo is held on-screen through the spoken description; on
+            // failure Nyx speaks the honest "camera offline" miss (no frame posted).
+            bool captured = camVisionCapture();
+            if (!captured) {
+                face.setState(Ph3b3Face::ERROR);
+                face.update();
+                Serial.println("[talk] vision capture FAILED — server speaks the miss");
+            }
+        } else {
+            face.setState(Ph3b3Face::THINKING);
+            face.update();
+        }
         // Thinking tell — direct servo command: loop() is blocked here, can't use applyBodyLanguage.
         M5StackChan.Motion.moveX(160, 200);   // 16° off-axis contemplative look
         M5StackChan.Motion.moveY(390, 180);   // 39° — soft upward gaze
@@ -604,6 +630,19 @@ private:
         bool ok = !_replyText.startsWith("ERR") && !_replyText.startsWith("HTTP") &&
                   !_replyText.startsWith("(no");
         Serial.printf("[D4] /chat reply='%.60s' ok=%d\n", _replyText.c_str(), (int)ok);
+
+        // Native photo loop teardown: the spoken description has finished, so
+        // release the held photo and hand the LCD back to the face. Runs on every
+        // exit path below (barge-in / exit word / normal). No-op if capture failed.
+        if (_visionTurn) {
+            _visionTurn = false;
+            if (g_faceOwnedByCamera) {
+                g_faceOwnedByCamera = false;
+                face.clearBubbleNow();
+                face.setState(Ph3b3Face::IDLE);
+                face.update();
+            }
+        }
 
         // Barge-in: tap during SPEAK → reset idle and go straight to LISTEN
         if (_bargeIn) {

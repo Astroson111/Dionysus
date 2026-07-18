@@ -122,7 +122,7 @@ static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbea
 // verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
 // stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
 #define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
-#define ARGUS_FW_HASH       "dio-66fc608"   // current firmware build id
+#define ARGUS_FW_HASH       "dio-7220407"   // current firmware build id (native photo loop)
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -172,6 +172,11 @@ volatile uint32_t gLastPetMs = 0;
 // wraps the render, never touches it (render-starvation lesson).
 volatile bool g_faceOwnedByCamera = false;
 CamServer camServer;
+
+// Bridge for TalkApp's native photo loop: TalkApp.h is included before CamServer.h
+// (can't see the type), so the vision-capture trigger goes through this free
+// function. Declared `extern bool camVisionCapture();` in TalkApp.h.
+bool camVisionCapture() { return camServer.captureDisplayPush(); }
 
 static void _settingsApply() {
     gSpeakerVolume    = SET_VOL_LEVELS[gVolIdx];

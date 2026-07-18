@@ -15,6 +15,13 @@
 #pragma once
 #include <M5Unified.h>
 
+// Set by a camera capture (CamServer) when it owns the LCD — e.g. the native
+// photo loop holding a captured frame on-screen while Nyx describes it. While
+// true, the face renderer stands down so it can't paint over the photo. Defined
+// in the .ino; loop() already skips face.update() on it, but the direct
+// update()/setSpeakingLevel() calls inside TTS playback need the guard too.
+extern volatile bool g_faceOwnedByCamera;
+
 class Ph3b3Face {
  public:
   enum State { BOOT, CONNECTING, IDLE, LISTENING, THINKING, SPEAKING, ERROR, FOCUSED };
@@ -93,6 +100,7 @@ class Ph3b3Face {
   void  setCrescentTabHighlight(bool v) { _crescentTabHighlight = v; }
 
   void setSpeakingLevel(float level01) {
+    if (g_faceOwnedByCamera) return;   // camera holds the LCD — don't drive the mouth
     lastLevel   = constrain(level01, 0.f, 1.f);
     lastLevelMs = millis();
   }
@@ -147,6 +155,7 @@ class Ph3b3Face {
   }
 
   void update() {
+    if (g_faceOwnedByCamera) return;   // camera holds the LCD (native photo loop)
     uint32_t now = millis();
     float    t   = now / 1000.0f;
 
