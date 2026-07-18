@@ -49,6 +49,7 @@
 #include "KaraokeApp.h"
 #include "GhostApp.h"
 #include "SettingsApp.h"
+#include "CamServer.h"
 
 // ── TLS cert bundle ───────────────────────────────────────────────────────────
 // ISRG Root X1 (RSA) + Root X2 (ECDSA) concatenated.
@@ -114,6 +115,14 @@ static bool     sSyncDone      = false;
 static uint32_t sConnectedAt   = 0;
 static bool     sHealthOnline  = false;   // last /health probe reached the server (2xx)
 static uint32_t sLastHealth    = 0;       // millis() of the last /health probe
+static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbeat POST
+
+// ── Argus fleet heartbeat ─────────────────────────────────────────────────────
+// Dio POSTs a tiny status JSON to Ph3b3's /argus/heartbeat every 60s, on the same
+// verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
+// stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
+#define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
+#define ARGUS_FW_HASH       "dio-66fc608"   // current firmware build id
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -158,6 +167,11 @@ float gLedBrightness    = SET_LED_LEVELS[SET_LED_DEFAULT];
 // by TalkApp's dead-air exit so petting counts as activity. Timestamp only; it
 // never gates the render path (per the sputter-throttle lesson).
 volatile uint32_t gLastPetMs = 0;
+
+// Camera (Phase 2). g_faceOwnedByCamera pauses face.update() during a capture —
+// wraps the render, never touches it (render-starvation lesson).
+volatile bool g_faceOwnedByCamera = false;
+CamServer camServer;
 
 static void _settingsApply() {
     gSpeakerVolume    = SET_VOL_LEVELS[gVolIdx];
@@ -213,6 +227,30 @@ static int _healthCheck() {
     int code = http.GET();
     http.end();
     return code;                     // 2xx online; 401/403 denied; <0 no route
+}
+
+// POST a tiny status JSON to /argus/heartbeat (fleet observability). Rides the
+// verified check-in path (Basic auth + X-Ph3b3-Device: stackchan — the server
+// IP-pins Dio via dio_host). Fire-and-forget: any failure is ignored so a flaky
+// network never stalls the face. Payload stays well under 200 B.
+static void _sendArgusHeartbeat() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    WiFiClientSecure tls;
+    tls.setInsecure();
+    tls.setTimeout(6000);
+    HTTPClient http;
+    if (!http.begin(tls, gSrvHost.c_str(), gSrvPort, "/argus/heartbeat", true)) return;
+    http.setAuthorization(gSrvUser.c_str(), gSrvPass.c_str());
+    http.addHeader("X-Ph3b3-Device", "stackchan");
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(6000);
+    char body[192];
+    int n = snprintf(body, sizeof(body),
+        "{\"battery\":%d,\"rssi\":%d,\"uptime\":%lu,\"firmware_hash\":\"%s\",\"free_heap\":%u}",
+        (int)M5.Power.getBatteryLevel(), (int)WiFi.RSSI(),
+        (unsigned long)(millis() / 1000UL), ARGUS_FW_HASH, (unsigned)ESP.getFreeHeap());
+    http.POST((uint8_t*)body, n);
+    http.end();
 }
 
 // Probe /health and set the on-screen status word. One quick retry so a slow
@@ -480,6 +518,10 @@ static void wifiSupervisorTick() {
         // Recover a stale non-online status word: re-probe /health every 20s ONLY
         // while not online. Stops once online — no probe cost or face stutter when
         // healthy. Covers a transient failure latched by the one-shot boot probe.
+        if (sSyncDone && millis() - sLastArgusHb > ARGUS_HEARTBEAT_MS) {
+            sLastArgusHb = millis();
+            _sendArgusHeartbeat();
+        }
         if (sSyncDone && !sHealthOnline && millis() - sLastHealth > 20000) {
             sLastHealth = millis();
             _refreshHealthStatus();
@@ -750,6 +792,8 @@ void setup() {
     M5StackChan.Motion.moveY(TILT_HOME, 50);
     M5StackChan.Motion.moveX(0, 50);
 
+    camServer.begin();   // Phase 2: init CoreS3 camera (shares M5 I2C) + :8080 control server
+
     appMgr.registerApp(&talkApp);     // 0
     appMgr.registerApp(&networkApp);  // 1
     appMgr.registerApp(&karaokeApp);  // 2
@@ -812,6 +856,7 @@ void loop() {
     }
 
     wifiSupervisorTick();
+    camServer.handle();     // service the camera control server (:8080) + monitor tick
 
     crescentMenu.update();  // updates g_overlayOpen + handles mode-switch taps
     appMgr.update();        // app logic (checks g_overlayOpen before processing touches)
@@ -819,7 +864,7 @@ void loop() {
     // crescent drawer is open — otherwise the push flickers behind the overlay
     // (the drawer redraws over a static frame instead; face resumes on close).
     bool appOwnsScreen = appMgr.active() && appMgr.active()->ownsScreen();
-    if (!appOwnsScreen && !g_overlayOpen) face.update();  // renders face + crescent tab, pushes
+    if (!appOwnsScreen && !g_overlayOpen && !g_faceOwnedByCamera) face.update();  // renders face + crescent tab, pushes (paused during camera capture)
     _cueLeds();             // base-LED cue: pet=pink (any state) > listening=LED Color (LED-only)
     appMgr.draw();          // app overlays (e.g. karaoke lyrics)
     crescentMenu.draw();    // mode panel slides over everything when open
