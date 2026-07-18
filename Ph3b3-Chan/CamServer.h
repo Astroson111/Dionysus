@@ -90,10 +90,15 @@ public:
         camera_fb_t* fb = esp_camera_fb_get();
         if (fb) {
             if (fb->format == PIXFORMAT_RGB565) { // QVGA RGB565 == the 320x240 LCD
+                // This sensor's RGB565 buffer is native little-endian — frame2jpg
+                // (the Nyx copy) renders it correctly with NO swap, so the LCD push
+                // must not swap either. swapBytes(true) here scrambled it into the
+                // teal/orange "negative". Save/restore so the face UI is untouched.
                 M5.Display.startWrite();
-                M5.Display.setSwapBytes(true);    // esp_camera RGB565 is byte-swapped vs M5GFX
-                M5.Display.pushImage(0, 0, fb->width, fb->height, (uint16_t*)fb->buf);
+                bool prevSwap = M5.Display.getSwapBytes();
                 M5.Display.setSwapBytes(false);
+                M5.Display.pushImage(0, 0, fb->width, fb->height, (uint16_t*)fb->buf);
+                M5.Display.setSwapBytes(prevSwap);
                 M5.Display.endWrite();
             }
             uint8_t* jpg = nullptr; size_t jlen = 0;
