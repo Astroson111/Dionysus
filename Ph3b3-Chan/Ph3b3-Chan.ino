@@ -122,7 +122,7 @@ static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbea
 // verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
 // stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
 #define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
-#define ARGUS_FW_HASH       "dio-pet"          // pet-response smile (+ pending hp VAD)
+#define ARGUS_FW_HASH       "dio-12scap"       // fixed 12s cap (VAD scrapped) + wider pet smile
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.

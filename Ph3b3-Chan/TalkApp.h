@@ -51,7 +51,6 @@ public:
         _pttBuf     = nullptr;
         _pttSamples = 0;
         _wasTouch   = false;
-        _recAmp     = 0.0f;
         _bargeIn         = false;
         _heardText       = "";
         _replyText       = "";
@@ -207,75 +206,28 @@ public:
                 int chunk = min(512, PTT_MAX - _pttSamples);
                 if (chunk <= 0) { _stopRecordingAndDispatch(); break; }
                 M5.Mic.record(&_pttBuf[_pttSamples], chunk, PTT_RATE);
-
-                // LEVEL rms on a high-passed copy (fan/HEPA rumble removed); the
-                // samples in _pttBuf stay RAW — that's what ships to Whisper.
-                float rms = _hpRms(&_pttBuf[_pttSamples], chunk);
-                _recAmp = _recAmp * 0.6f + rms * 0.4f;
                 _pttSamples += chunk;
-
                 uint32_t elapsed = millis() - _recStartMs;
-                // Calibrate the (high-passed) ambient floor ONCE.
-                if (_noiseFloor == 0.0f) {
-                    if (_awaitFloor > 0.0f) {
-                        // Wake path: onset already fired → the recording head is
-                        // speech, not ambient. Reuse the high-passed ambient measured
-                        // during AWAITING (same meter, directly comparable).
-                        _noiseFloor = max(VAD_FLOOR_MIN, _awaitFloor);
-                    } else if (elapsed < VAD_CALIBRATE_MS) {
-                        _noiseAccum += rms * rms;   // tap-from-idle: measure ambient from the pre-speech head
-                        _noiseSamples++;
-                    } else if (_noiseSamples > 0) {
-                        _noiseFloor = max(VAD_FLOOR_MIN, sqrtf(_noiseAccum / _noiseSamples));
-                    }
-                    if (_noiseFloor > 0.0f) {
-                        // Sanity clamp: if even the START threshold sits above a
-                        // plausible speech level, the room is too loud to endpoint on
-                        // energy → fall back to the timed cap (never refuse to record).
-                        _noisyRoom = (_noiseFloor * VAD_START_MULT > VAD_SPEECH_CEIL);
-                        char _cb[80];
-                        snprintf(_cb, sizeof(_cb), "floor=%.4f noisy=%d await=%.4f",
-                                 _noiseFloor, (int)_noisyRoom, _awaitFloor);
-                        _dbgState(_cb);
-                        if (_noisyRoom) Serial.println("[vad] noisy-room fallback → timed cap");
-                    }
-                }
-                // Hysteretic endpoint: > floor×START = speech (reset the silence timer);
-                // < floor×STOP = silence (arm it); between the two, hold state → no
-                // flutter at the boundary. Skipped entirely in a clamped noisy room.
-                if (_noiseFloor > 0.0f && elapsed >= VAD_MIN_MS && !_noisyRoom) {
-                    if (rms < _minRms) _minRms = rms;   // [DBG] quietest moment seen
-                    if (rms > _noiseFloor * VAD_START_MULT)      _silenceStartMs = 0;
-                    else if (rms < _noiseFloor * VAD_STOP_MULT) { if (_silenceStartMs == 0) _silenceStartMs = millis(); }
-                }
 
-                bool vad      = (!_noisyRoom && _silenceStartMs > 0 &&
-                                 millis() - _silenceStartMs >= VAD_SILENCE_MS);
-                bool full     = (elapsed >= VAD_MAX_MS || _pttSamples >= PTT_MAX);
-                // NB: conversation-idle is NOT an end-of-recording condition. The idle
-                // clock (_convLastValidMs) is stamped at RECORDING START, so testing it
-                // here cut every utterance off at CONV_IDLE_MS (9s) mid-word — the true
-                // "hard-capped ~10s" bug. An active recording means the user IS talking;
-                // it ends only on silence (vad) or the 20s runaway backstop (full).
-                // Between-turn idle is handled where it belongs: AWAITING dead-air +
-                // the dispatch-entry idle check.
+                // Energy-based endpointing was scrapped (2026-07-19): a fan/HEPA
+                // basement keeps the level above any silence floor — even high-passed —
+                // so the VAD never fired and captures rode to the cap anyway. Fixed cap
+                // instead: predictable, no premature mid-word cuts. End early with a tap.
+                // (The 9s convIdle cut was a separate, already-removed bug — do NOT test
+                // conversation-idle here; the user is actively talking during a recording.)
+                bool full = (elapsed >= REC_CAP_MS || _pttSamples >= PTT_MAX);
 
-                // Deliberate mid-turn tap → exit (entry bounce rejected by VAD_MIN_MS).
+                // Deliberate mid-turn tap → exit the conversation (entry bounce rejected
+                // by REC_MIN_MS).
                 int16_t _tx, _ty;
-                if (M5StackChan.Display().getTouch(&_tx, &_ty) && _inConversation && elapsed >= VAD_MIN_MS) {
+                if (M5StackChan.Display().getTouch(&_tx, &_ty) && _inConversation && elapsed >= REC_MIN_MS) {
                     M5.Mic.end();
                     if (_pttBuf) { heap_caps_free(_pttBuf); _pttBuf = nullptr; }
                     _pttSamples = 0;
                     _endConversation();
                     break;
                 }
-                if (vad || full) {
-                    char _db[112];   // [DBG-STATE] why did we end? floor vs the quietest moment
-                    snprintf(_db, sizeof(_db),
-                             "endpt vad=%d full=%d floor=%.4f minrms=%.4f rms=%.4f await=%.4f el=%lu",
-                             (int)vad, (int)full, _noiseFloor, _minRms, rms, _awaitFloor,
-                             (unsigned long)elapsed);
-                    _dbgState(_db);
+                if (full) {
                     _stopRecordingAndDispatch();
                     break;
                 }
@@ -342,27 +294,18 @@ private:
     // gate at ~1730). Calibrate via /transcribe [DBG-MIC]: want rms ~2000, peak < ~30000.
     static constexpr int      JUNK_MIN_LEN          = 2;      // transcript chars below this → noise
     static constexpr int      PTT_RATE      = 16000;
-    static constexpr int      PTT_MAX       = PTT_RATE * 20;  // 20s hard cap = 640 KB PSRAM (energy-endpointed; rarely reached)
+    static constexpr int      PTT_MAX       = PTT_RATE * 12;  // 12s hard cap = 384 KB PSRAM (fixed-cap capture)
     static constexpr int      CHUNK_SAMP    = 2048;           // ~93 ms @ 22050 Hz; larger = fewer gaps
-    // VAD consts — millis()-based so timing is correct regardless of M5.Mic.record() blocking.
-    // Endpointing is energy-based: capture ends when rolling RMS stays below the
-    // ambient-calibrated threshold for VAD_SILENCE_MS (the hangover), not on a fixed
-    // duration. VAD_MAX_MS is only a runaway backstop (constant noise / never-silent room).
-    static constexpr uint32_t VAD_CALIBRATE_MS = 200;    // ambient noise-floor window (tap path; wake path reuses _awaitFloor)
-    static constexpr uint32_t VAD_MIN_MS       = 1000;   // min capture before VAD can end (≥1s floor)
-    static constexpr uint32_t VAD_SILENCE_MS   = 1100;   // end-of-utterance hangover: silence this long → done. 1100ms holds through natural mid-sentence pauses (>0.8s) yet ends ~1.1s after speech. History: 1800(laggy)->900->500(clipped pauses)->700(demo)->1100(long-utterance brief).
-    static constexpr uint32_t VAD_MAX_MS       = 20000;  // hard runaway backstop (constant-noise room); normal end is energy-based
-    static constexpr float    VAD_FLOOR_MIN    = 0.0010f;// abs. minimum ambient floor (level meter is high-passed now, so genuinely lower)
-    // Relative, hysteretic endpointing (fan/HEPA basements). Level RMS is high-passed
-    // (HP_ALPHA, ~275 Hz) so low-freq rumble vanishes from the meter — the big lever.
-    // Thresholds are multiples of the calibrated (high-passed) ambient floor:
-    //   START (speech) > floor × START_MULT  (~9 dB)  — hysteresis HIGH edge
-    //   STOP  (silence) < floor × STOP_MULT   (~3 dB)  — hysteresis LOW edge
-    // Between the two edges the state is held → no flutter at the boundary.
-    static constexpr float    HP_ALPHA         = 0.90f;  // single-pole HP on the LEVEL signal only (audio to Whisper is untouched)
-    static constexpr float    VAD_START_MULT   = 2.82f;  // +9 dB over floor → speech
-    static constexpr float    VAD_STOP_MULT    = 1.41f;  // +3 dB over floor → silence
-    static constexpr float    VAD_SPEECH_CEIL  = 0.25f;  // if floor×START_MULT exceeds this, room too loud → timed-cap fallback
+    // Capture is FIXED-CAP: energy endpointing was scrapped (2026-07-19) — a fan/HEPA
+    // basement kept the level above any silence floor so the VAD never fired and
+    // captures rode to the cap anyway. A recording ends only at REC_CAP_MS or an
+    // early tap. The always-listening ONSET (wake) still uses a high-passed ambient
+    // floor, so HP_ALPHA / VAD_FLOOR_MIN / VAD_CALIBRATE_MS remain for that path.
+    static constexpr uint32_t REC_CAP_MS       = 12000;  // hard 12s capture cap; tap to end sooner
+    static constexpr uint32_t REC_MIN_MS       = 1000;   // ignore a screen tap in the first 1s (entry-bounce reject)
+    static constexpr uint32_t VAD_CALIBRATE_MS = 200;    // AWAITING ambient-floor window (onset/wake only)
+    static constexpr float    VAD_FLOOR_MIN    = 0.0010f;// min high-passed ambient floor for onset detection
+    static constexpr float    HP_ALPHA         = 0.90f;  // single-pole HP ~275Hz for the onset level meter (fan rumble out)
     // Always-listening onset detection
     static constexpr int      MONITOR_CHUNK   = 256;     // samples per onset-check frame (~16 ms @ 16 kHz)
     static constexpr uint32_t ONSET_MIN_MS    = 150;     // ms of loud signal before auto-trigger
@@ -375,15 +318,7 @@ private:
     int      _pttSamples = 0;
     uint32_t _recStartMs = 0;
     bool     _wasTouch   = false;
-    float    _recAmp     = 0.0f;   // smoothed mic RMS during recording
     bool     _bargeIn    = false;  // set when tap interrupts playback → restart listening
-    // VAD state
-    float    _noiseFloor     = 0.0f;
-    float    _noiseAccum     = 0.0f;
-    int      _noiseSamples   = 0;
-    uint32_t _silenceStartMs = 0;   // millis() when current silence window began; 0 = not in silence
-    float    _minRms         = 999.0f; // [DBG] quietest RMS seen after VAD_MIN_MS this recording
-    bool     _noisyRoom      = false;  // sanity clamp: floor too high to endpoint → timed-cap fallback
     String   _heardText;
     String   _replyText;
     String   _sessionId;          // generated on init(), stable for a conversation, reset on exit/idle
@@ -476,12 +411,6 @@ private:
         }
         _pttSamples     = 0;
         _recStartMs     = millis();
-        _noiseFloor     = 0.0f;
-        _noiseAccum     = 0.0f;
-        _noiseSamples   = 0;
-        _silenceStartMs = 0;
-        _minRms         = 999.0f;
-        _noisyRoom      = false;
 
         // Ensure speaker I2S is fully released before mic claims the shared BCK/WS bus.
         // _doChatAndPlay() ends it after normal drain, but _startRecording() can also
