@@ -105,6 +105,12 @@ class Ph3b3Face {
     lastLevelMs = millis();
   }
 
+  // Pet response: a head-pat (Si12T) → warm smile, held while petting, eased back
+  // to neutral over ~PET_HOLD_MS. Call on each detected pet; repeated calls refresh
+  // the timer so sustained petting holds the smile without strobing. Local moment
+  // only — no state change, no capture, no network.
+  void petTouch() { _petUntilMs = millis() + PET_HOLD_MS; }
+
   void setGaze(float yaw, float pitch) {
     _gazeYaw    = constrain(yaw,   -1.0f, 1.0f);
     _gazePitch  = constrain(pitch, -1.0f, 1.0f);
@@ -286,6 +292,8 @@ class Ph3b3Face {
 
   uint32_t blinkStart = 0, nextBlinkMs = 0, nextGlanceMs = 0, lastLevelMs = 0;
   float    lastLevel  = 0;
+  static constexpr uint32_t PET_HOLD_MS = 2500;   // smile lingers this long after the last pet, then eases to neutral
+  uint32_t _petUntilMs = 0;                        // millis() the pet smile holds until (0 = never petted)
   String   statusLine;
   bool _showStatus           = true;
   bool _showCrescentTab      = false;
@@ -351,6 +359,20 @@ class Ph3b3Face {
       case FOCUSED:    faceBright = 0.9f;  mouthRY = MBASE * 0.55f;               break;
     }
 
+    // ── Pet response: warm smile + happy-eye squint while/after a head-pat ──────
+    // Only over IDLE/FOCUSED — never overrides the speaking mouth or error frown,
+    // so a pet during TTS can't fight or freeze the playback animation.
+    float petSmile = 0.0f;
+    if (state == IDLE || state == FOCUSED) {
+      int32_t rem = (int32_t)(_petUntilMs - millis());
+      if (rem > 0)
+        petSmile = rem > 600 ? 1.0f : rem / 600.0f;   // hold, then ease out over the last 600ms
+    }
+    if (petSmile > 0.0f) {
+      mouthRY   = MBASE + petSmile * MSPK * 1.9f;      // wider, warmer than the speaking smile
+      flatMouth = false; frown = false;
+    }
+
     canvas.fillScreen(0x0000);
 
     // 1 — outer glow
@@ -379,6 +401,15 @@ class Ph3b3Face {
     int elidY = ey - ESY + ELID_OFF;
     canvas.fillEllipse(LEX, elidY, ESX + 2, ELID_RY, cFace);
     canvas.fillEllipse(REX, elidY, ESX + 2, ELID_RY, cFace);
+
+    // Happy-eye squint on a pet: a face-colour lid rises from the bottom of each
+    // sclera, curving the eyes into a warm ^‿^. Scales with the smile so it eases
+    // in and out together.
+    if (petSmile > 0.05f) {
+      int lidRY = (int)(ESY * 0.85f * petSmile);
+      canvas.fillEllipse(LEX, ey + ESY, ESX + 2, lidRY, cFace);
+      canvas.fillEllipse(REX, ey + ESY, ESX + 2, lidRY, cFace);
+    }
 
     // 5 — blink: face-colour rect drops from eye top
     if (blink > 0.01f) {

@@ -122,7 +122,7 @@ static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbea
 // verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
 // stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
 #define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
-#define ARGUS_FW_HASH       "dio-endpoint-3"  // energy endpointing, 20s cap
+#define ARGUS_FW_HASH       "dio-pet"          // pet-response smile (+ pending hp VAD)
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -817,7 +817,7 @@ void setup() {
 // TouchSensor + face.getState(); never touches servo/VAD/PTT/state/karaoke.
 // Color contract: pet = PINK (locked); listening = the LED Color setting (default
 // purple). Both scaled by the LED brightness setting (Off → dark).
-static void _cueLeds() {
+static int _cueLeds() {   // returns pet intensity 0..9 (for the pet-smile trigger in loop)
     static int      lastMode = 0;      // 0 none, 1 listen, 2 pet
     static uint32_t lastMs   = 0;
     const auto& ints = M5StackChan.TouchSensor.getIntensities();  // 3 ch, 0..3 each
@@ -845,6 +845,7 @@ static void _cueLeds() {
         M5StackChan.refreshRgb();
     }
     lastMode = mode;
+    return pet;
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
@@ -869,8 +870,15 @@ void loop() {
     // crescent drawer is open — otherwise the push flickers behind the overlay
     // (the drawer redraws over a static frame instead; face resumes on close).
     bool appOwnsScreen = appMgr.active() && appMgr.active()->ownsScreen();
-    if (!appOwnsScreen && !g_overlayOpen && !g_faceOwnedByCamera) face.update();  // renders face + crescent tab, pushes (paused during camera capture)
-    _cueLeds();             // base-LED cue: pet=pink (any state) > listening=LED Color (LED-only)
+    bool faceLive = !appOwnsScreen && !g_overlayOpen && !g_faceOwnedByCamera;
+    if (faceLive) face.update();  // renders face + crescent tab, pushes (paused during camera capture)
+    int pet = _cueLeds();   // base-LED cue: pet=pink (any state) > listening=LED Color (LED-only)
+    // Pet → warm smile, ONLY on the live idle face and only in a resting state, so a
+    // pet never reads through while an app/overlay/keyboard/camera owns the screen,
+    // nor during recording/speaking. Guardrail: petting can't trigger PTT/karaoke.
+    if (pet > 0 && faceLive &&
+        (face.getState() == Ph3b3Face::IDLE || face.getState() == Ph3b3Face::FOCUSED))
+        face.petTouch();
     appMgr.draw();          // app overlays (e.g. karaoke lyrics)
     crescentMenu.draw();    // mode panel slides over everything when open
 
