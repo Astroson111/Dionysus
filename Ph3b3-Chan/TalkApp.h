@@ -129,12 +129,10 @@ public:
             static int16_t monBuf[MONITOR_CHUNK];
             M5.Mic.record(monBuf, MONITOR_CHUNK, PTT_RATE);
 
-            float rms = 0.0f;
-            for (int i = 0; i < MONITOR_CHUNK; i++) {
-                float s = monBuf[i] / 32768.0f;
-                rms += s * s;
-            }
-            rms = sqrtf(rms / MONITOR_CHUNK);
+            // High-passed level (same meter the recording loop uses) so ambient
+            // calibration and endpointing are on the SAME footing — fan rumble is
+            // out of both, and _awaitFloor is directly reusable as the recording floor.
+            float rms = _hpRms(monBuf, MONITOR_CHUNK);
 
             uint32_t now = millis();
 
@@ -210,37 +208,49 @@ public:
                 if (chunk <= 0) { _stopRecordingAndDispatch(); break; }
                 M5.Mic.record(&_pttBuf[_pttSamples], chunk, PTT_RATE);
 
-                float rms = 0.0f;
-                for (int i = 0; i < chunk; i++) {
-                    float s = _pttBuf[_pttSamples + i] / 32768.0f;
-                    rms += s * s;
-                }
-                rms = sqrtf(rms / chunk);
+                // LEVEL rms on a high-passed copy (fan/HEPA rumble removed); the
+                // samples in _pttBuf stay RAW — that's what ships to Whisper.
+                float rms = _hpRms(&_pttBuf[_pttSamples], chunk);
                 _recAmp = _recAmp * 0.6f + rms * 0.4f;
                 _pttSamples += chunk;
 
                 uint32_t elapsed = millis() - _recStartMs;
+                // Calibrate the (high-passed) ambient floor ONCE.
                 if (_noiseFloor == 0.0f) {
                     if (_awaitFloor > 0.0f) {
-                        // Wake path: onset already fired, so the first 200ms of THIS
-                        // recording is speech, not ambient — calibrating on it would
-                        // over-estimate the floor and endpoint too eagerly. Reuse the
-                        // true ambient measured during AWAITING instead.
-                        _noiseFloor = max(VAD_FLOOR_MIN, _awaitFloor * VAD_THRESH_MULT);
+                        // Wake path: onset already fired → the recording head is
+                        // speech, not ambient. Reuse the high-passed ambient measured
+                        // during AWAITING (same meter, directly comparable).
+                        _noiseFloor = max(VAD_FLOOR_MIN, _awaitFloor);
                     } else if (elapsed < VAD_CALIBRATE_MS) {
-                        _noiseAccum += rms * rms;   // tap-from-idle path: no prior ambient,
-                        _noiseSamples++;            // so measure it from the pre-speech head
+                        _noiseAccum += rms * rms;   // tap-from-idle: measure ambient from the pre-speech head
+                        _noiseSamples++;
                     } else if (_noiseSamples > 0) {
-                        _noiseFloor = max(VAD_FLOOR_MIN,
-                                         sqrtf(_noiseAccum / _noiseSamples) * VAD_THRESH_MULT);
+                        _noiseFloor = max(VAD_FLOOR_MIN, sqrtf(_noiseAccum / _noiseSamples));
+                    }
+                    if (_noiseFloor > 0.0f) {
+                        // Sanity clamp: if even the START threshold sits above a
+                        // plausible speech level, the room is too loud to endpoint on
+                        // energy → fall back to the timed cap (never refuse to record).
+                        _noisyRoom = (_noiseFloor * VAD_START_MULT > VAD_SPEECH_CEIL);
+                        char _cb[80];
+                        snprintf(_cb, sizeof(_cb), "floor=%.4f noisy=%d await=%.4f",
+                                 _noiseFloor, (int)_noisyRoom, _awaitFloor);
+                        _dbgState(_cb);
+                        if (_noisyRoom) Serial.println("[vad] noisy-room fallback → timed cap");
                     }
                 }
-                if (_noiseFloor > 0.0f && elapsed >= VAD_MIN_MS) {
-                    if (rms < _noiseFloor) { if (_silenceStartMs == 0) _silenceStartMs = millis(); }
-                    else _silenceStartMs = 0;
+                // Hysteretic endpoint: > floor×START = speech (reset the silence timer);
+                // < floor×STOP = silence (arm it); between the two, hold state → no
+                // flutter at the boundary. Skipped entirely in a clamped noisy room.
+                if (_noiseFloor > 0.0f && elapsed >= VAD_MIN_MS && !_noisyRoom) {
+                    if (rms < _minRms) _minRms = rms;   // [DBG] quietest moment seen
+                    if (rms > _noiseFloor * VAD_START_MULT)      _silenceStartMs = 0;
+                    else if (rms < _noiseFloor * VAD_STOP_MULT) { if (_silenceStartMs == 0) _silenceStartMs = millis(); }
                 }
 
-                bool vad      = (_silenceStartMs > 0 && millis() - _silenceStartMs >= VAD_SILENCE_MS);
+                bool vad      = (!_noisyRoom && _silenceStartMs > 0 &&
+                                 millis() - _silenceStartMs >= VAD_SILENCE_MS);
                 bool full     = (elapsed >= VAD_MAX_MS || _pttSamples >= PTT_MAX);
                 // NB: conversation-idle is NOT an end-of-recording condition. The idle
                 // clock (_convLastValidMs) is stamped at RECORDING START, so testing it
@@ -260,6 +270,12 @@ public:
                     break;
                 }
                 if (vad || full) {
+                    char _db[112];   // [DBG-STATE] why did we end? floor vs the quietest moment
+                    snprintf(_db, sizeof(_db),
+                             "endpt vad=%d full=%d floor=%.4f minrms=%.4f rms=%.4f await=%.4f el=%lu",
+                             (int)vad, (int)full, _noiseFloor, _minRms, rms, _awaitFloor,
+                             (unsigned long)elapsed);
+                    _dbgState(_db);
                     _stopRecordingAndDispatch();
                     break;
                 }
@@ -336,8 +352,17 @@ private:
     static constexpr uint32_t VAD_MIN_MS       = 1000;   // min capture before VAD can end (≥1s floor)
     static constexpr uint32_t VAD_SILENCE_MS   = 1100;   // end-of-utterance hangover: silence this long → done. 1100ms holds through natural mid-sentence pauses (>0.8s) yet ends ~1.1s after speech. History: 1800(laggy)->900->500(clipped pauses)->700(demo)->1100(long-utterance brief).
     static constexpr uint32_t VAD_MAX_MS       = 20000;  // hard runaway backstop (constant-noise room); normal end is energy-based
-    static constexpr float    VAD_THRESH_MULT  = 5.0f;   // threshold = noise_floor × this (was 3.0 — ambient spikes kept resetting window)
-    static constexpr float    VAD_FLOOR_MIN    = 0.003f; // abs. minimum threshold
+    static constexpr float    VAD_FLOOR_MIN    = 0.0010f;// abs. minimum ambient floor (level meter is high-passed now, so genuinely lower)
+    // Relative, hysteretic endpointing (fan/HEPA basements). Level RMS is high-passed
+    // (HP_ALPHA, ~275 Hz) so low-freq rumble vanishes from the meter — the big lever.
+    // Thresholds are multiples of the calibrated (high-passed) ambient floor:
+    //   START (speech) > floor × START_MULT  (~9 dB)  — hysteresis HIGH edge
+    //   STOP  (silence) < floor × STOP_MULT   (~3 dB)  — hysteresis LOW edge
+    // Between the two edges the state is held → no flutter at the boundary.
+    static constexpr float    HP_ALPHA         = 0.90f;  // single-pole HP on the LEVEL signal only (audio to Whisper is untouched)
+    static constexpr float    VAD_START_MULT   = 2.82f;  // +9 dB over floor → speech
+    static constexpr float    VAD_STOP_MULT    = 1.41f;  // +3 dB over floor → silence
+    static constexpr float    VAD_SPEECH_CEIL  = 0.25f;  // if floor×START_MULT exceeds this, room too loud → timed-cap fallback
     // Always-listening onset detection
     static constexpr int      MONITOR_CHUNK   = 256;     // samples per onset-check frame (~16 ms @ 16 kHz)
     static constexpr uint32_t ONSET_MIN_MS    = 150;     // ms of loud signal before auto-trigger
@@ -357,6 +382,8 @@ private:
     float    _noiseAccum     = 0.0f;
     int      _noiseSamples   = 0;
     uint32_t _silenceStartMs = 0;   // millis() when current silence window began; 0 = not in silence
+    float    _minRms         = 999.0f; // [DBG] quietest RMS seen after VAD_MIN_MS this recording
+    bool     _noisyRoom      = false;  // sanity clamp: floor too high to endpoint → timed-cap fallback
     String   _heardText;
     String   _replyText;
     String   _sessionId;          // generated on init(), stable for a conversation, reset on exit/idle
@@ -381,6 +408,7 @@ private:
     WiFiClientSecure _tls;
     HTTPClient       _http;
     WiFiUDP          _dbgUdp;   // [DBG-STATE] fire-and-forget state telemetry to Nyx
+    bool             _dbgUdpReady = false;   // WiFiUDP must be begin()'d before it will send
 
     // ── Base64 helpers ────────────────────────────────────────────────────────
     static int _b64val(char c) {
@@ -452,6 +480,8 @@ private:
         _noiseAccum     = 0.0f;
         _noiseSamples   = 0;
         _silenceStartMs = 0;
+        _minRms         = 999.0f;
+        _noisyRoom      = false;
 
         // Ensure speaker I2S is fully released before mic claims the shared BCK/WS bus.
         // _doChatAndPlay() ends it after normal drain, but _startRecording() can also
@@ -729,10 +759,32 @@ private:
         return hasGoodbye && _isPhoebeName(t);
     }
 
+    // High-passed RMS for LEVEL detection ONLY (single-pole HP, HP_ALPHA ≈ 275 Hz).
+    // Fan/HEPA rumble is low-frequency; removing it makes the meter track speech, not
+    // noise — the main fix for endpointing in a noisy room. The audio that ships to
+    // Whisper is always the raw buffer; this filtered copy never leaves this function.
+    // Stateless (xPrev seeded from buf[0], y=0) so there's no cross-chunk startup step.
+    static float _hpRms(const int16_t* buf, int n) {
+        if (n < 2) return 0.0f;
+        float xPrev = buf[0] / 32768.0f, y = 0.0f, acc = 0.0f;
+        for (int i = 1; i < n; i++) {
+            float x = buf[i] / 32768.0f;
+            y = HP_ALPHA * (y + x - xPrev);
+            xPrev = x;
+            acc += y * y;
+        }
+        return sqrtf(acc / (n - 1));
+    }
+
     // [DBG-STATE] fire-and-forget UDP state ping to Nyx — readable in the ph3b3
     // journal (grep DIO_STATE). Cheap: no handshake, non-blocking, drops silently.
     void _dbgState(const char* s) {
         if (WiFi.status() != WL_CONNECTED || gSrvHost.length() == 0) return;
+        // WiFiUDP must be begin()'d once before it will send — without it
+        // beginPacket() silently returns 0 and the packet never leaves the device
+        // (why DIO_STATE telemetry never reached Nyx despite the listener being up).
+        if (!_dbgUdpReady) _dbgUdpReady = (_dbgUdp.begin(DBG_STATE_PORT + 1) == 1);
+        if (!_dbgUdpReady) return;
         _dbgUdp.beginPacket(gSrvHost.c_str(), DBG_STATE_PORT);
         _dbgUdp.printf("%lu %s", (unsigned long)millis(), s);
         _dbgUdp.endPacket();
