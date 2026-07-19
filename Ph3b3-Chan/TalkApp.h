@@ -84,6 +84,7 @@ public:
         if (M5.Speaker.isPlaying(0)) return;          // never stomp TTS or any audio
         if (!_purrReady) { _genPurr(); _purrReady = true; }
         if (!M5.Speaker.isEnabled()) M5.Speaker.begin();
+        M5.Speaker.setVolume(gSpeakerVolume);         // match the system volume (was unset → silent)
         M5.Speaker.playRaw(_purrBuf, PURR_SAMPLES, PURR_RATE, false, 1, 0);   // non-blocking
     }
 
@@ -713,18 +714,22 @@ private:
     // noise — the main fix for endpointing in a noisy room. The audio that ships to
     // Whisper is always the raw buffer; this filtered copy never leaves this function.
     // Stateless (xPrev seeded from buf[0], y=0) so there's no cross-chunk startup step.
-    // Synthesise a soft purr: a low ~175 Hz tone with a ~26 Hz tremolo (the purr
-    // roll) under a short attack/release envelope, at low amplitude so it's gentle
-    // regardless of the volume preset. Filled once, then reused.
+    // Synthesise the pet chirp: a gentle pitch rise (~420→560 Hz — well within the
+    // tiny CoreS3 speaker's range, unlike a bass purr) with a ~32 Hz tremolo giving
+    // it a trill/purr quality, under a short attack/release envelope. Phase is
+    // integrated so the glide has no discontinuities. Filled once, then reused.
     void _genPurr() {
         const float dur = (float)PURR_SAMPLES / PURR_RATE;
+        float phase = 0.0f;
         for (int i = 0; i < PURR_SAMPLES; i++) {
-            float t   = (float)i / PURR_RATE;
-            float env = min(t / 0.03f, (dur - t) / 0.08f);   // 30ms attack, 80ms release
+            float t    = (float)i / PURR_RATE;
+            float env  = min(t / 0.03f, (dur - t) / 0.08f);   // 30ms attack, 80ms release
             if (env < 0.0f) env = 0.0f;
             if (env > 1.0f) env = 1.0f;
-            float trem = 0.55f + 0.45f * sinf(2.0f * M_PI * 26.0f * t);
-            _purrBuf[i] = (int16_t)(sinf(2.0f * M_PI * 175.0f * t) * trem * env * 5200.0f);
+            float freq = 420.0f + 140.0f * (t / dur);         // gentle upward chirp
+            phase += 2.0f * M_PI * freq / PURR_RATE;
+            float trem = 0.6f + 0.4f * sinf(2.0f * M_PI * 32.0f * t);   // purr/trill roll
+            _purrBuf[i] = (int16_t)(sinf(phase) * trem * env * 15000.0f);
         }
     }
 
