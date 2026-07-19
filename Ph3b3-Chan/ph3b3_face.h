@@ -292,7 +292,7 @@ class Ph3b3Face {
 
   uint32_t blinkStart = 0, nextBlinkMs = 0, nextGlanceMs = 0, lastLevelMs = 0;
   float    lastLevel  = 0;
-  static constexpr uint32_t PET_HOLD_MS = 2500;   // smile lingers this long after the last pet, then eases to neutral
+  static constexpr uint32_t PET_HOLD_MS = 1400;   // smile lingers this long after the last pet, then eases to neutral
   uint32_t _petUntilMs = 0;                        // millis() the pet smile holds until (0 = never petted)
   String   statusLine;
   bool _showStatus           = true;
@@ -369,7 +369,7 @@ class Ph3b3Face {
         petSmile = rem > 600 ? 1.0f : rem / 600.0f;   // hold, then ease out over the last 600ms
     }
     if (petSmile > 0.0f) {
-      mouthRY   = MBASE + petSmile * MSPK * 1.9f;      // wider, warmer than the speaking smile
+      mouthRY   = MBASE + petSmile * MSPK * 2.6f;      // deeper, warmer than the speaking smile
       flatMouth = false; frown = false;
     }
 
@@ -446,11 +446,13 @@ class Ph3b3Face {
       canvas.fillSmoothRoundRect(FCX - MRAW, my, MRAW * 2, 3, 1, cMo);
     } else {
       float ry = frown ? -mouthRY : mouthRY;
+      // A pet widens the grin too (not just deepens it) — up to ~45% wider at full smile.
+      float rx = (float)MRARC * (1.0f + petSmile * 0.45f);
       if (frown) {
         drawMouthArc(FCX, my, (float)MRARC, ry, cMo, MLIP);
       } else {
-        drawMouthArc(FCX, my - 2, (float)MRARC * 0.78f, ry * 0.45f, cW,  MTEETH); // teeth
-        drawMouthArc(FCX, my,     (float)MRARC,          ry,          cMo, MLIP);   // lip
+        drawMouthArc(FCX, my - 2, rx * 0.78f, ry * 0.45f, cW,  MTEETH); // teeth
+        drawMouthArc(FCX, my,     rx,          ry,          cMo, MLIP);   // lip
       }
     }
 
