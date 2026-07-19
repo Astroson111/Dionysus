@@ -369,7 +369,7 @@ class Ph3b3Face {
         petSmile = rem > 600 ? 1.0f : rem / 600.0f;   // hold, then ease out over the last 600ms
     }
     if (petSmile > 0.0f) {
-      mouthRY   = MBASE + petSmile * MSPK * 2.6f;      // deeper, warmer than the speaking smile
+      mouthRY   = MBASE + petSmile * MSPK * 0.6f;      // a modest warm smile (teeth show), not a grin
       flatMouth = false; frown = false;
     }
 
@@ -402,14 +402,6 @@ class Ph3b3Face {
     canvas.fillEllipse(LEX, elidY, ESX + 2, ELID_RY, cFace);
     canvas.fillEllipse(REX, elidY, ESX + 2, ELID_RY, cFace);
 
-    // Happy-eye squint on a pet: a face-colour lid rises from the bottom of each
-    // sclera, curving the eyes into a warm ^‿^. Scales with the smile so it eases
-    // in and out together.
-    if (petSmile > 0.05f) {
-      int lidRY = (int)(ESY * 0.85f * petSmile);
-      canvas.fillEllipse(LEX, ey + ESY, ESX + 2, lidRY, cFace);
-      canvas.fillEllipse(REX, ey + ESY, ESX + 2, lidRY, cFace);
-    }
 
     // 5 — blink: face-colour rect drops from eye top
     if (blink > 0.01f) {
@@ -446,13 +438,11 @@ class Ph3b3Face {
       canvas.fillSmoothRoundRect(FCX - MRAW, my, MRAW * 2, 3, 1, cMo);
     } else {
       float ry = frown ? -mouthRY : mouthRY;
-      // A pet widens the grin too (not just deepens it) — up to ~45% wider at full smile.
-      float rx = (float)MRARC * (1.0f + petSmile * 0.45f);
       if (frown) {
         drawMouthArc(FCX, my, (float)MRARC, ry, cMo, MLIP);
       } else {
-        drawMouthArc(FCX, my - 2, rx * 0.78f, ry * 0.45f, cW,  MTEETH); // teeth
-        drawMouthArc(FCX, my,     rx,          ry,          cMo, MLIP);   // lip
+        drawMouthArc(FCX, my - 2, (float)MRARC * 0.78f, ry * 0.45f, cW,  MTEETH); // teeth
+        drawMouthArc(FCX, my,     (float)MRARC,          ry,          cMo, MLIP);   // lip
       }
     }
 
