@@ -242,8 +242,13 @@ public:
 
                 bool vad      = (_silenceStartMs > 0 && millis() - _silenceStartMs >= VAD_SILENCE_MS);
                 bool full     = (elapsed >= VAD_MAX_MS || _pttSamples >= PTT_MAX);
-                bool convIdle = (_inConversation && _convLastValidMs > 0 &&
-                                 millis() - _convLastValidMs > CONV_IDLE_MS);
+                // NB: conversation-idle is NOT an end-of-recording condition. The idle
+                // clock (_convLastValidMs) is stamped at RECORDING START, so testing it
+                // here cut every utterance off at CONV_IDLE_MS (9s) mid-word — the true
+                // "hard-capped ~10s" bug. An active recording means the user IS talking;
+                // it ends only on silence (vad) or the 20s runaway backstop (full).
+                // Between-turn idle is handled where it belongs: AWAITING dead-air +
+                // the dispatch-entry idle check.
 
                 // Deliberate mid-turn tap → exit (entry bounce rejected by VAD_MIN_MS).
                 int16_t _tx, _ty;
@@ -254,7 +259,7 @@ public:
                     _endConversation();
                     break;
                 }
-                if (vad || full || convIdle) {
+                if (vad || full) {
                     _stopRecordingAndDispatch();
                     break;
                 }
@@ -321,7 +326,7 @@ private:
     // gate at ~1730). Calibrate via /transcribe [DBG-MIC]: want rms ~2000, peak < ~30000.
     static constexpr int      JUNK_MIN_LEN          = 2;      // transcript chars below this → noise
     static constexpr int      PTT_RATE      = 16000;
-    static constexpr int      PTT_MAX       = PTT_RATE * 30;  // 30s hard cap = 960 KB PSRAM (energy-endpointed; rarely reached)
+    static constexpr int      PTT_MAX       = PTT_RATE * 20;  // 20s hard cap = 640 KB PSRAM (energy-endpointed; rarely reached)
     static constexpr int      CHUNK_SAMP    = 2048;           // ~93 ms @ 22050 Hz; larger = fewer gaps
     // VAD consts — millis()-based so timing is correct regardless of M5.Mic.record() blocking.
     // Endpointing is energy-based: capture ends when rolling RMS stays below the
@@ -330,7 +335,7 @@ private:
     static constexpr uint32_t VAD_CALIBRATE_MS = 200;    // ambient noise-floor window (tap path; wake path reuses _awaitFloor)
     static constexpr uint32_t VAD_MIN_MS       = 1000;   // min capture before VAD can end (≥1s floor)
     static constexpr uint32_t VAD_SILENCE_MS   = 1100;   // end-of-utterance hangover: silence this long → done. 1100ms holds through natural mid-sentence pauses (>0.8s) yet ends ~1.1s after speech. History: 1800(laggy)->900->500(clipped pauses)->700(demo)->1100(long-utterance brief).
-    static constexpr uint32_t VAD_MAX_MS       = 30000;  // hard runaway backstop (constant-noise room); normal end is energy-based
+    static constexpr uint32_t VAD_MAX_MS       = 20000;  // hard runaway backstop (constant-noise room); normal end is energy-based
     static constexpr float    VAD_THRESH_MULT  = 5.0f;   // threshold = noise_floor × this (was 3.0 — ambient spikes kept resetting window)
     static constexpr float    VAD_FLOOR_MIN    = 0.003f; // abs. minimum threshold
     // Always-listening onset detection
