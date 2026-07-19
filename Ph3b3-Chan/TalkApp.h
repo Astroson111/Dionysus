@@ -73,6 +73,20 @@ public:
         _http.setReuse(true);
     }
 
+    // Audio arbitration for the pet purr: the mic and speaker share the I2S bus, so
+    // a purr may only touch the speaker when the mic is OFF. That's exactly PH_IDLE
+    // (resting, waiting for a tap) — never AWAITING/RECORDING (mic live) or playback.
+    bool micIdle() const { return _phase == PH_IDLE; }
+
+    // Soft one-shot purr on a pet. Guarded: never over TTS/any playback. Caller must
+    // also confirm micIdle() so we don't grab the I2S bus from an active mic.
+    void purr() {
+        if (M5.Speaker.isPlaying(0)) return;          // never stomp TTS or any audio
+        if (!_purrReady) { _genPurr(); _purrReady = true; }
+        if (!M5.Speaker.isEnabled()) M5.Speaker.begin();
+        M5.Speaker.playRaw(_purrBuf, PURR_SAMPLES, PURR_RATE, false, 1, 0);   // non-blocking
+    }
+
     void update() override {
         // ── Overlay gate — CrescentMenu handles all touches while panel is open ─
         if (g_overlayOpen) {
@@ -296,6 +310,10 @@ private:
     static constexpr int      PTT_RATE      = 16000;
     static constexpr int      PTT_MAX       = PTT_RATE * 12;  // 12s hard cap = 384 KB PSRAM (fixed-cap capture)
     static constexpr int      CHUNK_SAMP    = 2048;           // ~93 ms @ 22050 Hz; larger = fewer gaps
+    // Pet purr — a short soft warble synthesised once into _purrBuf, played on a pet
+    // only when micIdle() (PH_IDLE) and the speaker is free.
+    static constexpr int      PURR_RATE     = 16000;
+    static constexpr int      PURR_SAMPLES  = 4480;           // ~280 ms
     // Capture is FIXED-CAP: energy endpointing was scrapped (2026-07-19) — a fan/HEPA
     // basement kept the level above any silence floor so the VAD never fired and
     // captures rode to the cap anyway. A recording ends only at REC_CAP_MS or an
@@ -343,6 +361,8 @@ private:
     WiFiClientSecure _tls;
     HTTPClient       _http;
     WiFiUDP          _dbgUdp;   // [DBG-STATE] fire-and-forget state telemetry to Nyx
+    int16_t          _purrBuf[PURR_SAMPLES];   // synthesised pet purr (lazy-filled)
+    bool             _purrReady = false;
     bool             _dbgUdpReady = false;   // WiFiUDP must be begin()'d before it will send
 
     // ── Base64 helpers ────────────────────────────────────────────────────────
@@ -693,6 +713,21 @@ private:
     // noise — the main fix for endpointing in a noisy room. The audio that ships to
     // Whisper is always the raw buffer; this filtered copy never leaves this function.
     // Stateless (xPrev seeded from buf[0], y=0) so there's no cross-chunk startup step.
+    // Synthesise a soft purr: a low ~175 Hz tone with a ~26 Hz tremolo (the purr
+    // roll) under a short attack/release envelope, at low amplitude so it's gentle
+    // regardless of the volume preset. Filled once, then reused.
+    void _genPurr() {
+        const float dur = (float)PURR_SAMPLES / PURR_RATE;
+        for (int i = 0; i < PURR_SAMPLES; i++) {
+            float t   = (float)i / PURR_RATE;
+            float env = min(t / 0.03f, (dur - t) / 0.08f);   // 30ms attack, 80ms release
+            if (env < 0.0f) env = 0.0f;
+            if (env > 1.0f) env = 1.0f;
+            float trem = 0.55f + 0.45f * sinf(2.0f * M_PI * 26.0f * t);
+            _purrBuf[i] = (int16_t)(sinf(2.0f * M_PI * 175.0f * t) * trem * env * 5200.0f);
+        }
+    }
+
     static float _hpRms(const int16_t* buf, int n) {
         if (n < 2) return 0.0f;
         float xPrev = buf[0] / 32768.0f, y = 0.0f, acc = 0.0f;

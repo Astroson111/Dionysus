@@ -122,7 +122,7 @@ static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbea
 // verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
 // stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
 #define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
-#define ARGUS_FW_HASH       "dio-12scap"       // fixed 12s cap (VAD scrapped) + wider pet smile
+#define ARGUS_FW_HASH       "dio-purr"         // fixed 12s cap + pet smile + purr
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -877,8 +877,17 @@ void loop() {
     // pet never reads through while an app/overlay/keyboard/camera owns the screen,
     // nor during recording/speaking. Guardrail: petting can't trigger PTT/karaoke.
     if (pet > 0 && faceLive &&
-        (face.getState() == Ph3b3Face::IDLE || face.getState() == Ph3b3Face::FOCUSED))
+        (face.getState() == Ph3b3Face::IDLE || face.getState() == Ph3b3Face::FOCUSED)) {
         face.petTouch();
+        // Soft purr — ONLY when the mic is off (talkApp PH_IDLE) so it can't grab the
+        // shared I2S bus from an active mic, and never over TTS (purr() guards that).
+        // Cooldown so sustained petting purrs every few seconds, not every frame.
+        static uint32_t sLastPurrMs = 0;
+        if (talkApp.micIdle() && millis() - sLastPurrMs > 3500) {
+            talkApp.purr();
+            sLastPurrMs = millis();
+        }
+    }
     appMgr.draw();          // app overlays (e.g. karaoke lyrics)
     crescentMenu.draw();    // mode panel slides over everything when open
 
