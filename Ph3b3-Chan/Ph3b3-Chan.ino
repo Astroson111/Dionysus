@@ -386,6 +386,8 @@ static void _runPortal() {
             "<input name='host' value='" + gSrvHost + "'>"
             "<label>Ph3b3 port</label>"
             "<input name='port' value='" + String(gSrvPort) + "'>"
+            "<label>Ph3b3 device key</label>"
+            "<input name='svrkey' type='password' placeholder='(blank keeps saved key)'>"
             "<button type='submit'>Save &amp; Reboot</button>"
             "</form>"
             "<div style='position:fixed;bottom:12px;right:12px;width:110px;opacity:0.75'>"
@@ -456,9 +458,15 @@ static void _runPortal() {
         sPrefs.putString(SSID_KEYS[0], ssid);
         sPrefs.putString(PASS_KEYS[0], pass);
         sPrefs.end();
-        // Server target stays ATOMIC: only overwrite when BOTH host and port
-        // are present. Auth is never entered on the open setup AP.
-        if (host.length() > 0 && port > 0) _saveServer(host, port, gSrvUser, gSrvPass);
+        // Per-device Ph3b3 key — blank keeps the saved key (parallel to Wi-Fi pass).
+        // NOTE: the setup AP is open, so this key (like the Wi-Fi password) crosses
+        // it in the clear during the brief setup window — same exposure, local only.
+        String svrkey = server.arg("svrkey"); svrkey.trim();
+        String newPass = svrkey.length() ? svrkey : gSrvPass;
+        // Server target stays ATOMIC: overwrite when host+port are present; a
+        // key-only change still persists (reusing the saved host/port).
+        if (host.length() > 0 && port > 0)      _saveServer(host, port, gSrvUser, newPass);
+        else if (svrkey.length())               _saveServer(gSrvHost, gSrvPort, gSrvUser, newPass);
         server.send(200, "text/html",
             "<html><body style='font-family:sans-serif;background:#0a0318;"
             "color:#e0d4ff;text-align:center;padding:2rem'>"
