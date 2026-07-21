@@ -122,7 +122,7 @@ static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbea
 // verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
 // stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
 #define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
-#define ARGUS_FW_HASH       "dio-purr3"        // audible chirp (freq up, vol set)
+#define ARGUS_FW_HASH       "dio-batt"        // audible chirp (freq up, vol set)
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -249,10 +249,17 @@ static void _sendArgusHeartbeat() {
     http.addHeader("X-Ph3b3-Device", "stackchan");
     http.addHeader("Content-Type", "application/json");
     http.setTimeout(6000);
-    char body[192];
+    // Battery + charging (M5Unified PMIC). Unavailable → JSON null, never a guess.
+    int32_t _lvl = M5.Power.getBatteryLevel();
+    char batStr[8];
+    if (_lvl < 0 || _lvl > 100) strcpy(batStr, "null");
+    else snprintf(batStr, sizeof(batStr), "%ld", (long)_lvl);
+    int _chg = (int)M5.Power.isCharging();          // 0=discharging 1=charging 2=unknown
+    const char* chgStr = (_chg == 1) ? "true" : (_chg == 0) ? "false" : "null";
+    char body[224];
     int n = snprintf(body, sizeof(body),
-        "{\"battery\":%d,\"rssi\":%d,\"uptime\":%lu,\"firmware_hash\":\"%s\",\"free_heap\":%u}",
-        (int)M5.Power.getBatteryLevel(), (int)WiFi.RSSI(),
+        "{\"battery\":%s,\"charging\":%s,\"rssi\":%d,\"uptime\":%lu,\"firmware_hash\":\"%s\",\"free_heap\":%u}",
+        batStr, chgStr, (int)WiFi.RSSI(),
         (unsigned long)(millis() / 1000UL), ARGUS_FW_HASH, (unsigned)ESP.getFreeHeap());
     http.POST((uint8_t*)body, n);
     http.end();
