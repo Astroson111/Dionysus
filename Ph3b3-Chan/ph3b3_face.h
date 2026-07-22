@@ -360,10 +360,13 @@ class Ph3b3Face {
     }
 
     // ── Pet response: warm smile + happy-eye squint while/after a head-pat ──────
-    // Only over IDLE/FOCUSED — never overrides the speaking mouth or error frown,
-    // so a pet during TTS can't fight or freeze the playback animation.
+    // Over IDLE/FOCUSED, and — deliberately — over ERROR: a head-pat while she wears
+    // the blue "bad-news" frown comforts her OUT of it (frown → warm smile, and she
+    // brightens back up), so a good petting reassures her she did nothing wrong. Still
+    // excluded from the live SPEAKING/LISTENING mouth so a pet can't fight the talking
+    // animation.
     float petSmile = 0.0f;
-    if (state == IDLE || state == FOCUSED) {
+    if (state == IDLE || state == FOCUSED || state == ERROR) {
       int32_t rem = (int32_t)(_petUntilMs - millis());
       if (rem > 0)
         petSmile = rem > 600 ? 1.0f : rem / 600.0f;   // hold, then ease out over the last 600ms
@@ -371,6 +374,9 @@ class Ph3b3Face {
     if (petSmile > 0.0f) {
       mouthRY   = MBASE + petSmile * MSPK * 0.6f;      // a modest warm smile (teeth show), not a grin
       flatMouth = false; frown = false;
+      // Lift the dim ERROR shading toward full brightness so the comfort actually
+      // shows — she comes back up to a bright, happy face as she's petted.
+      faceBright = faceBright + (1.0f - faceBright) * petSmile;
     }
 
     canvas.fillScreen(0x0000);

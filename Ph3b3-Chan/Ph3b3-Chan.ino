@@ -888,11 +888,14 @@ void loop() {
     bool faceLive = !appOwnsScreen && !g_overlayOpen && !g_faceOwnedByCamera;
     if (faceLive) face.update();  // renders face + crescent tab, pushes (paused during camera capture)
     int pet = _cueLeds();   // base-LED cue: pet=pink (any state) > listening=LED Color (LED-only)
-    // Pet → warm smile, ONLY on the live idle face and only in a resting state, so a
-    // pet never reads through while an app/overlay/keyboard/camera owns the screen,
-    // nor during recording/speaking. Guardrail: petting can't trigger PTT/karaoke.
+    // Pet → warm smile, on the live face in a resting state (IDLE/FOCUSED) AND while
+    // she wears the ERROR "bad news" frown — a good petting comforts her out of it
+    // (frown → smile + brighten, see Ph3b3Face::render). Never while an app/overlay/
+    // keyboard/camera owns the screen, nor during recording/speaking. Guardrail:
+    // petting can't trigger PTT/karaoke.
     if (pet > 0 && faceLive &&
-        (face.getState() == Ph3b3Face::IDLE || face.getState() == Ph3b3Face::FOCUSED)) {
+        (face.getState() == Ph3b3Face::IDLE || face.getState() == Ph3b3Face::FOCUSED ||
+         face.getState() == Ph3b3Face::ERROR)) {
         face.petTouch();
         // Soft purr — ONLY when the mic is off (talkApp PH_IDLE) so it can't grab the
         // shared I2S bus from an active mic, and never over TTS (purr() guards that).
