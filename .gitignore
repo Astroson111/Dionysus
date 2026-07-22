@@ -9,3 +9,12 @@ build/
 *.elf
 *.map
 *.hex
+
+# Music / audio content — BRING YOUR OWN. Never commit copyrighted tracks;
+# users supply their own music and follow README "Karaoke — bring your own music".
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.aac

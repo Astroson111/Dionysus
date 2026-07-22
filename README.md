@@ -53,6 +53,27 @@ docs/                audit + hardware contracts
   | **LED** | Off / Dim / **Full** | Brightness of the status/pet ring. Off = dark (status logic still runs). |
   | **Color** | Purple … White (9) | Color of the *listening* ring. Default Purple; pet stays pink. |
 
+## Karaoke — bring your own music
+**No music ships with this repo — supply your own tracks** (and respect the copyright of
+whatever you load; that's on you, not this project). Dio's `KaraokeApp` plays **WAV** files
+from a `/karaoke/` folder on a **FAT32** SD card, browsed on-screen (top⅓ = prev · center =
+play · bottom⅓ = next).
+
+Per-file requirements:
+- **PCM signed 16-bit, mono or stereo** (44.1 kHz works well), with a **canonical 44-byte
+  WAV header** — stray metadata chunks make the on-device parser mis-read the stream.
+- The filename (minus `.wav`) is the on-screen title; tracks sort alphabetically — lead with
+  `01 `, `02 `… to order them.
+- Optional `<name>.lrc` (LRC timestamps) beside a track → synced on-screen lyrics.
+
+Convert any source file with ffmpeg — these flags strip metadata/art and force a clean header:
+```
+ffmpeg -i "your song.mp3" -map 0:a:0 -c:a pcm_s16le -ar 44100 -ac 2 \
+       -map_metadata -1 -fflags +bitexact -flags:a +bitexact "/karaoke/01 Your Song.wav"
+```
+The card must be **FAT32** — the ESP32 SD library cannot mount exFAT (a big card formatted
+on Windows is usually exFAT; reformat it FAT32).
+
 ## Build & flash
 Use **arduino-cli** (or the Arduino IDE). **Never PlatformIO** — `pio run` builds the wrong
 ~1.0 MB binary from an orphaned prototype and bricks the device. A correct build is **~1.39 MB**.
