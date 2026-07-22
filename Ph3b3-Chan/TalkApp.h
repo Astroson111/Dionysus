@@ -346,6 +346,7 @@ private:
     bool     _inConversation  = false;
     uint32_t _convLastValidMs = 0;   // millis() of last successful /chat; idle clock measures from here
     bool     _exitAfterTurn   = false; // set when exit word detected — end after current SPEAK
+    String   _expression;              // goodbye reaction Nyx chose this turn (server-driven; exit turn only)
     bool     _visionTurn      = false; // Nyx flagged this utterance for Dio's own camera (native photo loop)
     // Always-listening state
     float    _awaitFloor    = 0.0f;
@@ -796,6 +797,9 @@ private:
         _http.setAuthorization(gSrvUser.c_str(), gSrvPass.c_str());
         _http.addHeader("Content-Type", "application/json");
         _http.addHeader("X-Ph3b3-Device", "stackchan");
+        // Goodbye turn → tell Nyx so she judges the sign-off expression (server-driven
+        // face reaction). She returns it in the manifest's "expression" field.
+        if (_exitAfterTurn) _http.addHeader("X-Ph3b3-Farewell", "1");
 
         JsonDocument body;
         body["message"]    = message;
@@ -976,12 +980,15 @@ private:
         filter["stream_id"]   = true;
         filter["chunk_count"] = true;
         filter["text"]        = true;
+        filter["expression"]  = true;   // server-chosen goodbye reaction (before "audio" in the head)
         JsonDocument jdoc;
         deserializeJson(jdoc, peek, peekLen, DeserializationOption::Filter(filter));
         const char* sid = jdoc["stream_id"];
         String streamId = (sid && *sid) ? String(sid) : "";
         int chunkCount  = jdoc["chunk_count"] | 0;
         const char* t0  = jdoc["text"];
+        const char* ex  = jdoc["expression"];
+        _expression = (ex && *ex) ? String(ex) : "";   // fresh each turn; empty → warm default
         String chunk0Text   = (t0 && *t0) ? String(t0) : "";
         String responseText = chunk0Text;   // return/log value (first slice of the reply)
 
@@ -1056,6 +1063,21 @@ private:
 
     // ── Mood reaction — expression beat before TTS plays ─────────────────────
     void _applyMoodReaction(const String& text) {
+        // A fond farewell should never wear the crude keyword frown. On an exit turn,
+        // NYX judged how she feels signing off (from the whole chat) and sent it in the
+        // manifest's "expression"; we just render that beat, then the caller flips to
+        // SPEAKING for the goodbye line. Unknown/empty → warm (a goodbye is never unkind).
+        if (_exitAfterTurn) {
+            Ph3b3Face::State st = Ph3b3Face::IDLE;
+            bool smile = true;                       // warm = IDLE + teeth-smile (default)
+            if      (_expression == "amused")  { st = Ph3b3Face::THINKING;  smile = false; }
+            else if (_expression == "excited") { st = Ph3b3Face::LISTENING; smile = false; }
+            else if (_expression == "neutral") { st = Ph3b3Face::IDLE;      smile = false; }
+            face.setState(st);
+            if (smile) face.petTouch();
+            for (int i = 0; i < 5; i++) { face.update(); delay(60); }
+            return;
+        }
         String t = text; t.toLowerCase();
         Ph3b3Face::State mood = Ph3b3Face::SPEAKING;
 
