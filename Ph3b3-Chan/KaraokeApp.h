@@ -14,7 +14,9 @@ static const int K_TILT_HOME = 450;  // 45° — neutral center
 static const int K_PAN_RANGE = 150;  // ±15° sway during karaoke
 
 // ── Audio streaming ─────────────────────────────────────────────────────────
-static const int  K_CHUNK    = 4096;   // PCM samples per buffer half; 46 ms at stereo 44100 Hz
+static const int  K_CHUNK    = 8192;   // PCM samples per buffer half; ~93 ms at stereo 44100 Hz.
+                                       // Doubled from 4096 → deeper cushion (2-deep = ~186 ms) so
+                                       // WiFi/servo/loop jitter can't drain the buffer mid-frame.
 static const int  K_CHAN     = 0;      // M5 Speaker virtual channel
 
 // ── LRC lyrics ──────────────────────────────────────────────────────────────
@@ -110,6 +112,11 @@ public:
         }
 
         if (_state == PLAYING) {
+            // Top up BOTH speaker DMA slots every frame. One chunk/frame left the
+            // 2-deep buffer half-empty whenever a frame ran long (WiFi tick, camera
+            // server, servo move) → underrun → choppy. _streamAudio() self-guards on
+            // isPlaying>=2, so the second call no-ops when the queue is already full.
+            _streamAudio();
             _streamAudio();
             _tickNod();
             _tickLeds();
