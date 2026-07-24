@@ -133,7 +133,7 @@ static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbea
 // verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
 // stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
 #define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
-#define ARGUS_FW_HASH       "dio-wifi3"       // 3 saved networks + ordered connect ladder
+#define ARGUS_FW_HASH       "dio-wifi3b"      // 3 saved networks + ladder; keyboard handoff fixed
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -688,6 +688,17 @@ static void _wsMsg(const char* line1, const String& line2, uint16_t accent, uint
     }
 }
 
+// Wait out a touch carried over from another screen — same hazard tkPrompt
+// guards against. The keyboard's "done" key overlaps this list's footer button,
+// so without this, finishing a password could fall straight through into the
+// phone portal.
+static void _wsDrainTouch() {
+    auto& d = M5StackChan.Display();
+    int16_t x = 0, y = 0;
+    while (d.getTouch(&x, &y)) { M5StackChan.update(); delay(8); }
+    delay(60);
+}
+
 // SSIDs can be 32 chars; the row is not. Trim with a visible marker so a
 // truncated name never reads as a different (wrong) network.
 static String _wsFit(const String& s, int maxChars) {
@@ -774,7 +785,9 @@ static bool _wsEditSlot(int i) {
         _wsMsg("Not saved", "cancelled, or no name entered", _pcol(255, 170, 120), 1400);
         return false;
     }
-    String tPass = "Slot " + String(i + 1) + " - password:";
+    // Name the network on the password screen — it's the confirmation that the
+    // SSID went in, and which of the three slots you're filling.
+    String tPass = "Password for " + _wsFit(ssid, 20) + ":";
     String pass  = tkPrompt(tPass.c_str(), true);
     if (pass.length() == 0) {
         _wsMsg("Not saved", "cancelled, or no password entered", _pcol(255, 170, 120), 1400);
@@ -798,6 +811,7 @@ void launchWifiSlots() {
     int      downX = 0, downY = 0, lastX = 0, lastY = 0;
     uint32_t downMs = 0, lastConnCheck = 0, lastHoldDraw = 0;
 
+    _wsDrainTouch();   // don't inherit the tap that opened this screen
     for (;;) {
         M5StackChan.update();
 
@@ -853,7 +867,7 @@ void launchWifiSlots() {
             if (dx < -WS_SWIPE && abs(dy) < 55) return;   // right-to-left → back to Settings
             if (abs(dx) < 14 && abs(dy) < 14) {
                 if (row == -1) { _runPortal(); return; }  // never returns (reboots on save)
-                if (row >= 0)  { _wsEditSlot(row); dirty = true; }
+                if (row >= 0)  { _wsEditSlot(row); _wsDrainTouch(); dirty = true; }
             } else {
                 dirty = true;                             // a stray drag smudged a row
             }

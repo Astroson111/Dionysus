@@ -99,7 +99,20 @@ inline String tkPrompt(const char* title, bool mask) {
         keys(true, -1, -1);
     };
 
-    bool wasTouch = false, dirty = true;
+    // Draw the new prompt FIRST, then wait out any touch carried over from the
+    // screen that handed off to us. We return on touch-DOWN of "done", so the
+    // finger that ended the previous prompt is still on the glass when the next
+    // one opens — and "done" is at the same coordinates on every keyboard, so
+    // without this the password prompt would instantly "press" its own done and
+    // return empty. Rendering before the wait keeps it from looking like a hang.
+    render();
+    {
+        int16_t hx = 0, hy = 0;
+        while (d.getTouch(&hx, &hy)) { M5StackChan.update(); delay(8); }
+        delay(80);   // debounce the release
+    }
+
+    bool wasTouch = false, dirty = false;   // render() above already drew it
     for (;;) {
         M5StackChan.update();
         // Password reveal: keep the latest char visible ~1s, then re-mask it.
