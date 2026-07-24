@@ -47,11 +47,17 @@ docs/                audit + hardware contracts
   exits back to her face. All choices persist to NVS (namespace `"sc"`) and reload at boot:
   | Row | Options | Effect |
   |-----|---------|--------|
-  | **WiFi Setup** | on-screen keyboard | Type SSID + password on the touchscreen, save + reboot to join. No phone needed. (The phone captive portal `Dio-Setup` still auto-appears as a fallback on repeated connect failure.) |
+  | **WiFi** | 3 saved networks | Shows the network she's *actually* on. Opens a slot list: **tap** a row to type that slot's SSID + password on the on-screen keyboard, **hold** a row ~1s to clear it. No phone needed. The footer opens the `Dio-Setup` phone portal, which is also where the Ph3b3 host / port / device key live. |
   | **Microphone** | Low / **Medium** / High | Capture gain 4 / 6 / 8. Medium is the tuned default. |
   | **Volume** | Low / **Medium** / High | Speaker output 40 / 70 / 100%. |
   | **LED** | Off / Dim / **Full** | Brightness of the status/pet ring. Off = dark (status logic still runs). |
   | **Color** | Purple … White (9) | Color of the *listening* ring. Default Purple; pet stays pink. |
+
+  On boot — and again after any drop — she walks the filled WiFi slots **top to bottom**, ~8s
+  each, and keeps the first that answers. Empty slots are skipped, so slot 3 can be the only one
+  filled. Put the everyday network in slot 1 and the away-from-home one at the bottom, where it's
+  only reached when the ones above it aren't there. The boot splash names the network she landed
+  on (or lists the ones that didn't answer).
 
 ## Karaoke — bring your own music
 **No music ships with this repo — supply your own tracks** (and respect the copyright of
@@ -124,7 +130,7 @@ esptool --port /dev/ttyACM0 read-mac     # Dio = 44:1b:f6:e5:56:60
   on a fixed timer. Tap her face (or pet her) to keep her awake / wake her back up.
 
 ## Server
-Dio targets the Ph3b3 server at `https://<host>:7331` (mkcert TLS, `setInsecure()`); WiFi + host
-are set via **Settings → WiFi Setup** (on-screen keyboard) or the `Dio-Setup` captive portal, and
-stored atomically in NVS. Voice endpoints: `POST /transcribe`, `POST /chat/stream` +
+Dio targets the Ph3b3 server at `https://<host>:7331` (mkcert TLS, `setInsecure()`); WiFi is set
+via **Settings → WiFi** (on-screen keyboard, three saved networks) and host/port/device key via
+the `Dio-Setup` captive portal, stored atomically in NVS. Voice endpoints: `POST /transcribe`, `POST /chat/stream` +
 `GET /tts/chunk/{sid}/{n}` (chunked TTS so long replies stream instead of timing out).
