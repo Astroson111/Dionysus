@@ -9,8 +9,10 @@ extern bool       g_overlayOpen;   // crescent menu visible → it owns touch th
 extern AppManager appMgr;
 
 // Settings — a full-screen menu app (registered last, under the other modes). Rows:
-//   WiFi Setup / Microphone / Volume / LED / Color.  Tap a row to cycle/act.
+//   WiFi / Microphone / Volume / LED / Color.  Tap a row to cycle/act.
 //   Right-to-LEFT swipe anywhere exits back to her face (Talk).
+// The WiFi row shows the network she is ACTUALLY on (not just "connected") and
+// opens the three-slot saved-network list.
 // Owns the screen (ownsScreen()=true) so loop() skips the face push — the panel is
 // drawn once per change (no flicker). The crescent drawer still opens (swipe right
 // from the top-left tab) to jump to another mode.
@@ -19,6 +21,7 @@ public:
     void init() override {
         face.setState(Ph3b3Face::IDLE);
         _wasTouch = false; _ledPreviewEnd = 0; _dirty = true; _prevOverlay = false;
+        _netSsid = wifiConnectedSsid(); _lastNetPoll = millis();   // WiFi row correct on the first draw
     }
 
     void update() override {
@@ -29,6 +32,14 @@ public:
         // Redraw once after the crescent drawer closes over us.
         if (_prevOverlay && !g_overlayOpen) _dirty = true;
         _prevOverlay = g_overlayOpen;
+
+        // The WiFi row is live state, not a stored preset — poll it so a join or
+        // drop while the panel is open updates the row instead of going stale.
+        if (millis() - _lastNetPoll > 2000) {
+            _lastNetPoll = millis();
+            String ssid = wifiConnectedSsid();
+            if (ssid != _netSsid) { _netSsid = ssid; _dirty = true; }
+        }
 
         if (g_overlayOpen) { _wasTouch = false; return; }   // drawer owns touch
 
@@ -62,6 +73,8 @@ private:
     bool     _wasTouch = false, _dirty = true, _prevOverlay = false;
     int      _downX = 0, _downY = 0, _lastX = 0, _lastY = 0;
     uint32_t _ledPreviewEnd = 0;
+    uint32_t _lastNetPoll   = 0;
+    String   _netSsid;              // SSID shown on the WiFi row ("" = not connected)
 
     static const int TITLE_Y = 14;   // "Settings"
     static const int HINT_Y  = 34;   // swipe hint
@@ -103,7 +116,7 @@ private:
         int row = (ty - ROW_Y0) / ROW_H;
         if (row < 0 || row >= N_ROWS) return;
         switch (row) {
-            case 0: launchWifiPortal();                     break;  // captive setup portal (Dio-Setup: broadcast + on-screen IP)
+            case 0: launchWifiSlots();                       break;  // saved-network slot list (keyboard per slot; portal on its footer)
             case 1: settingsSetMic((gMicIdx + 1) % 3);        break;
             case 2: settingsSetVol((gVolIdx + 1) % 3);        break;
             case 3: settingsSetLed((gLedIdx + 1) % 3); _brightnessPreview(); break;
@@ -141,7 +154,12 @@ private:
         d.setTextColor(_col(120, 110, 160), _col(10, 7, 25));
         d.drawString("< swipe left to exit", w / 2, HINT_Y);
 
-        _drawRow(0, "WiFi Setup", "phone",                   true);
+        // Right-hand value is the live network, capped so a long SSID can't run
+        // under the label. "not connected" is a state worth seeing at a glance.
+        String net = _netSsid.length()
+                   ? (_netSsid.length() > 16 ? _netSsid.substring(0, 14) + ".." : _netSsid)
+                   : String("not connected");
+        _drawRow(0, "WiFi",       net,                       true);
         _drawRow(1, "Microphone", SET_MIC_NAMES[gMicIdx],    false);
         _drawRow(2, "Volume",     SET_VOL_NAMES[gVolIdx],    false);
         _drawRow(3, "LED",        SET_LED_NAMES[gLedIdx],    false);

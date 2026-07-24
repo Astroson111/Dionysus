@@ -10,10 +10,16 @@
  *   - ISRG Root X1 + X2 cert bundle for Let's Encrypt TLS
  *
  * WiFi setup:
- *   Provisioned on-device via the Dio-Setup phone portal (Settings -> WiFi Setup,
- *   or automatically on no creds / failed join). Creds persist in NVS "sc".
- *   SC_WIFI_SSID / SC_WIFI_PASS may be baked as a first-boot seed but are normally
- *   blank — provisioning is done from the portal, not hardcoded.
+ *   THREE saved networks (slots 0..2, NVS "sc": ssid0..2 / pass0..2). Settings ->
+ *   WiFi opens the slot list; tapping a row runs the on-screen SSID + password
+ *   keyboard for that slot, long-press clears it. Connect walks the filled slots
+ *   0 -> 2 in order, first success wins — so the network you want preferred goes
+ *   in the top slot and the away-from-home one goes at the bottom.
+ *   The Dio-Setup phone portal is still reachable (slot list footer, and raised
+ *   automatically when there are no creds / every slot failed at boot) — it is
+ *   also the only place that edits the Ph3b3 host / port / device key.
+ *   SC_WIFI_SSID / SC_WIFI_PASS may be baked as a first-boot seed for slot 0 but
+ *   are normally blank — provisioning is done on-device, not hardcoded.
  *
  * Mode switching: tap the crescent tab (top-left corner) to open the mode overlay.
  *
@@ -44,6 +50,7 @@
 #include "AppManager.h"
 #include "CrescentMenu.h"
 #include "SettingsStore.h"
+#include "TouchKeyboard.h"
 #include "TalkApp.h"
 #include "NetworkApp.h"
 #include "KaraokeApp.h"
@@ -103,14 +110,18 @@ tL4ndQavEi51mI38AjEAi/V3bNTIZargCyzuFJ0nN6T5U6VR5CmD1/iQMVtCnwr1
 )EOF";
 
 // ── WiFi / NVS ────────────────────────────────────────────────────────────────
+// Three saved networks. An empty SSID means the slot is unused and is SKIPPED —
+// slot order is preference order, not a packed list, so slot 2 can be the only
+// one filled. Key names are frozen: renaming them would orphan the network
+// already saved on every shipped device.
 static Preferences sPrefs;
 static const char  NVS_NS[]      = "sc";
 static const char* SSID_KEYS[]   = {"ssid0","ssid1","ssid2"};
 static const char* PASS_KEYS[]   = {"pass0","pass1","pass2"};
 static const int   SC_MAX_NETS   = 3;
+static const uint32_t SC_SLOT_JOIN_MS = 8000;   // association window per slot before we advance
 
 static bool     sWifiConnected = false;
-static uint32_t sLastReconnect = 0;
 static bool     sSyncDone      = false;
 static uint32_t sConnectedAt   = 0;
 static bool     sHealthOnline  = false;   // last /health probe reached the server (2xx)
@@ -122,7 +133,7 @@ static uint32_t sLastArgusHb   = 0;       // millis() of the last Argus heartbea
 // verified check-in path as her other calls (Basic auth + X-Ph3b3-Device:
 // stackchan). ARGUS_FW_HASH identifies this build for the panel's drift check.
 #define ARGUS_HEARTBEAT_MS  60000UL         // 60 s between heartbeats
-#define ARGUS_FW_HASH       "dio-batt"        // audible chirp (freq up, vol set)
+#define ARGUS_FW_HASH       "dio-wifi3b"      // 3 saved networks + ladder; keyboard handoff fixed
 
 // ── Server target — ATOMIC NVS record (host+port+user+pass as ONE unit) ───────
 // Compile-time SC_PH3B3_* are the first-boot SEED only; runtime always reads NVS.
@@ -301,6 +312,66 @@ static int _loadCreds(String ssids[], String passes[]) {
     return n;
 }
 
+// Pre-slot builds stored ONE network under un-indexed keys. Lift it into slot 0
+// (never overwriting a slot-0 entry) and drop the old keys, so upgrading to the
+// multi-slot build doesn't make anyone re-type their home network. No-op — and
+// costs one read-only NVS open — once it has run or on a device that never had
+// the old layout. Call before the first _loadCreds() of the boot.
+static void _migrateLegacyCreds() {
+    sPrefs.begin(NVS_NS, true);
+    String oldSsid = sPrefs.getString("ssid", "");
+    String oldPass = sPrefs.getString("pass", "");
+    String slot0   = sPrefs.getString(SSID_KEYS[0], "");
+    sPrefs.end();
+    if (oldSsid.length() == 0) return;
+
+    sPrefs.begin(NVS_NS, false);
+    if (slot0.length() == 0) {
+        sPrefs.putString(SSID_KEYS[0], oldSsid);
+        sPrefs.putString(PASS_KEYS[0], oldPass);
+        Serial.printf("[wifi] migrated legacy creds -> slot 0: %s\n", oldSsid.c_str());
+    } else {
+        Serial.println("[wifi] legacy creds found but slot 0 is taken — dropping the old keys");
+    }
+    sPrefs.remove("ssid");
+    sPrefs.remove("pass");
+    sPrefs.end();
+}
+
+// Write / clear one slot. Both open NVS read-write for a single transaction;
+// neither touches the other slots or the server record.
+static void _saveSlot(int i, const String& ssid, const String& pass) {
+    if (i < 0 || i >= SC_MAX_NETS) return;
+    sPrefs.begin(NVS_NS, false);
+    sPrefs.putString(SSID_KEYS[i], ssid);
+    sPrefs.putString(PASS_KEYS[i], pass);
+    sPrefs.end();
+    Serial.printf("[wifi] slot %d saved: %s\n", i, ssid.c_str());
+}
+
+static void _clearSlot(int i) {
+    if (i < 0 || i >= SC_MAX_NETS) return;
+    sPrefs.begin(NVS_NS, false);
+    sPrefs.remove(SSID_KEYS[i]);
+    sPrefs.remove(PASS_KEYS[i]);
+    sPrefs.end();
+    Serial.printf("[wifi] slot %d cleared\n", i);
+}
+
+// Next filled slot at or after `from`, or -1 if the pass is out of candidates.
+static int _nextFilledSlot(String ssids[], int from) {
+    for (int i = (from < 0 ? 0 : from); i < SC_MAX_NETS; i++)
+        if (ssids[i].length()) return i;
+    return -1;
+}
+
+// The SSID we are actually associated with (empty when down). Read from the
+// radio, not from a cached "we asked for this one" — with three candidates,
+// "connected" alone doesn't tell you which network you're on.
+String wifiConnectedSsid() {
+    return (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : String();
+}
+
 // (Server-side network sync removed 2026-07-16 — Dio provisions WiFi on-device
 //  via the Dio-Setup portal; the /stackchan/networks endpoint no longer exists.)
 
@@ -322,17 +393,80 @@ static void _wifiJoin(const char* ssid, const char* pass) {
     esp_wifi_connect();
 }
 
-static void _tryNextNetwork() {
+// ── The ladder ────────────────────────────────────────────────────────────────
+// Filled slots, 0 -> 2, first success wins; each slot gets SC_SLOT_JOIN_MS to
+// associate before we advance, so a wrong key in slot 0 costs 8s, not the link.
+// A pass that reaches the end rests (backoff, growing to 60s) and then starts
+// OVER at slot 0 — we never sit re-dialling one SSID, and a mid-session drop
+// re-runs the whole ladder instead of blind-reconnecting to the one that fell
+// over (the AP that just vanished is the least likely to answer next).
+// Non-blocking: one step per supervisor tick, so the face keeps rendering.
+static int      sLadderSlot  = -1;   // slot currently being attempted; -1 = between passes
+static uint32_t sLadderStart = 0;    // millis() the current attempt began
+static int      sLadderPass  = 0;    // consecutive full passes that found nothing
+static uint32_t sLadderRest  = 0;    // millis() the current rest period ends
+
+static void _ladderReset() {
+    sLadderSlot = -1; sLadderStart = 0; sLadderPass = 0; sLadderRest = 0;
+}
+
+// A definitive "this one isn't happening" — wrong key, or the SSID isn't in the
+// air — so we can advance without waiting out the window. ADVISORY ONLY: the
+// ESP32 driver doesn't reliably latch either status, and a stale one can survive
+// the mode cycle, so callers must ignore it until the attempt has had a moment
+// to settle and keep SC_SLOT_JOIN_MS as the real backstop.
+static const uint32_t SC_JOIN_SETTLE_MS = 1500;
+static bool _joinRejected(uint32_t elapsed) {
+    if (elapsed < SC_JOIN_SETTLE_MS) return false;
+    wl_status_t s = WiFi.status();
+    return s == WL_CONNECT_FAILED || s == WL_NO_SSID_AVAIL;
+}
+
+static void _ladderTick() {
+    uint32_t now = millis();
+    // Inside a slot's association window → let it play out, unless the driver
+    // has already told us this slot is a dead end.
+    if (sLadderSlot >= 0) {
+        uint32_t elapsed = now - sLadderStart;
+        if (elapsed < SC_SLOT_JOIN_MS && !_joinRejected(elapsed)) return;
+    }
+    // Resting between passes → don't touch NVS or the radio.
+    if (sLadderSlot < 0 && sLadderRest && (int32_t)(now - sLadderRest) < 0) return;
+
     String ssids[SC_MAX_NETS], passes[SC_MAX_NETS];
-    int n = _loadCreds(ssids, passes);
-    if (n == 0) {
-        Serial.println("[wifi] no creds — set SC_WIFI_SSID or sync from Ph3b3");
+    if (_loadCreds(ssids, passes) == 0) {
+        Serial.println("[wifi] no saved networks — Settings > WiFi to add one");
+        sLadderSlot = -1;
+        sLadderRest = now + 30000;   // nothing to climb; look again in 30s
         return;
     }
-    static int slot = 0;
-    slot = (slot + 1) % n;
-    Serial.printf("[wifi] reconnect slot %d: %s\n", slot, ssids[slot].c_str());
-    _wifiJoin(ssids[slot].c_str(), passes[slot].c_str());
+
+    int next = _nextFilledSlot(ssids, sLadderSlot + 1);
+    if (next < 0) {                  // pass exhausted → back off, then restart at slot 0
+        sLadderPass++;
+        sLadderSlot = -1;
+        uint32_t wait = 10000UL * (uint32_t)sLadderPass;
+        if (wait > 60000UL) wait = 60000UL;
+        sLadderRest = now + wait;
+        Serial.printf("[wifi] ladder pass %d found nothing — resting %us\n",
+                      sLadderPass, (unsigned)(wait / 1000));
+        return;
+    }
+
+    // The WPA supplicant needs room to allocate; cycling the radio is the cheap
+    // recovery. Restart the ladder from the top once the heap comes back.
+    if (ESP.getMaxAllocHeap() < 80000) {
+        Serial.println("[wifi] heap too low to associate — cycling radio");
+        WiFi.mode(WIFI_OFF); delay(100); WiFi.mode(WIFI_STA);
+        sLadderSlot = -1;
+        sLadderRest = now + 5000;
+        return;
+    }
+
+    sLadderSlot  = next;
+    sLadderStart = now;
+    Serial.printf("[wifi] ladder slot %d: %s\n", next, ssids[next].c_str());
+    _wifiJoin(ssids[next].c_str(), passes[next].c_str());
 }
 
 // Violet palette helper, BGR-aware like the keyboard (styling stays consistent).
@@ -517,20 +651,240 @@ static void _runPortal() {
     }
 }
 
-// Settings → WiFi Config entry: enter the existing phone captive portal on demand.
-// _runPortal() never returns — it serves the setup form until /save → ESP.restart().
+// Phone captive portal on demand (slot-list footer). _runPortal() never returns —
+// it serves the setup form until /save → ESP.restart(). Still the only surface
+// that edits the Ph3b3 host / port / device key.
 void launchWifiPortal() { _runPortal(); }
+
+// ── Settings → WiFi: the slot list ───────────────────────────────────────────
+// Three rows, each an SSID or "- empty -". Tap a row → the same two-screen entry
+// we already had (SSID keyboard → password keyboard) aimed at that slot. Hold a
+// row ~1s → clear it, with the row filling red as you hold so a stray thumb
+// isn't enough. Right-to-left swipe leaves. No new input surfaces: the keyboard
+// is tkPrompt, unchanged, just invoked per slot.
+// Blocking screen with its own touch loop (like _runPortal) — it does NOT run
+// through the face render loop, per the render-starvation lesson.
+static const int      WS_ROW_Y0  = 48;
+static const int      WS_ROW_H   = 38;
+static const int      WS_FOOT_Y  = 172;
+static const int      WS_FOOT_H  = 30;
+static const uint32_t WS_HOLD_MS = 900;    // hold-to-clear duration
+static const int      WS_SWIPE   = 70;     // right-to-left exit threshold
+
+// Centred status card. line2 optional (pass "" to omit).
+static void _wsMsg(const char* line1, const String& line2, uint16_t accent, uint32_t holdMs) {
+    auto& d = M5StackChan.Display();
+    d.fillScreen(_pcol(8, 6, 20));
+    d.setTextDatum(middle_center);
+    d.setTextSize(2); d.setTextColor(accent, _pcol(8, 6, 20));
+    d.drawString(line1, d.width() / 2, d.height() / 2 - 14);
+    if (line2.length()) {
+        d.setTextSize(1); d.setTextColor(_pcol(200, 185, 235), _pcol(8, 6, 20));
+        d.drawString(line2.c_str(), d.width() / 2, d.height() / 2 + 14);
+    }
+    if (holdMs) {
+        uint32_t t0 = millis();
+        while (millis() - t0 < holdMs) { M5StackChan.update(); delay(10); }
+    }
+}
+
+// Wait out a touch carried over from another screen — same hazard tkPrompt
+// guards against. The keyboard's "done" key overlaps this list's footer button,
+// so without this, finishing a password could fall straight through into the
+// phone portal.
+static void _wsDrainTouch() {
+    auto& d = M5StackChan.Display();
+    int16_t x = 0, y = 0;
+    while (d.getTouch(&x, &y)) { M5StackChan.update(); delay(8); }
+    delay(60);
+}
+
+// SSIDs can be 32 chars; the row is not. Trim with a visible marker so a
+// truncated name never reads as a different (wrong) network.
+static String _wsFit(const String& s, int maxChars) {
+    if ((int)s.length() <= maxChars) return s;
+    return s.substring(0, maxChars - 2) + "..";
+}
+
+static void _wsDrawRow(int i, const String& ssid, bool active, float holdFrac) {
+    auto& d = M5StackChan.Display();
+    const int y = WS_ROW_Y0 + i * WS_ROW_H, w = d.width();
+    const int x = 8, rw = w - 16, rh = WS_ROW_H - 6;
+    const uint16_t fill = _pcol(18, 10, 44);
+
+    d.fillRoundRect(x, y, rw, rh, 6, fill);
+    if (holdFrac > 0.0f) {                       // hold-to-clear progress
+        float f = holdFrac > 1.0f ? 1.0f : holdFrac;
+        int   fw = (int)((rw - 4) * f);
+        if (fw > 0) d.fillRect(x + 2, y + 2, fw, rh - 4, _pcol(110, 25, 45));
+    }
+    d.drawRoundRect(x, y, rw, rh, 6, active ? _pcol(120, 220, 150) : _pcol(70, 40, 150));
+
+    d.setTextSize(1);
+    d.setTextDatum(middle_left);
+    d.setTextColor(_pcol(120, 110, 160), fill);
+    d.drawString(String(i + 1).c_str(), x + 12, y + rh / 2);   // slot number = preference order
+    if (ssid.length()) {
+        d.setTextColor(_pcol(220, 205, 255), fill);
+        d.drawString(_wsFit(ssid, 26).c_str(), x + 30, y + rh / 2);
+    } else {
+        d.setTextColor(_pcol(105, 95, 140), fill);
+        d.drawString("- empty -", x + 30, y + rh / 2);
+    }
+    if (active) {                                 // the one we're actually on
+        d.setTextDatum(middle_right);
+        d.setTextColor(_pcol(120, 220, 150), fill);
+        d.drawString("on", x + rw - 12, y + rh / 2);
+    }
+}
+
+static void _wsDrawList(String ssids[], const String& conn, int holdRow, float holdFrac) {
+    auto& d = M5StackChan.Display();
+    const int w = d.width();
+    d.fillScreen(_pcol(8, 6, 20));
+
+    d.setTextDatum(top_center);
+    d.setTextSize(2); d.setTextColor(_pcol(200, 130, 255), _pcol(8, 6, 20));
+    d.drawString("WiFi", w / 2, 8);
+    d.setTextSize(1);
+    if (conn.length()) {
+        d.setTextColor(_pcol(120, 220, 150), _pcol(8, 6, 20));
+        d.drawString(("on " + _wsFit(conn, 30)).c_str(), w / 2, 30);
+    } else {
+        d.setTextColor(_pcol(190, 130, 130), _pcol(8, 6, 20));
+        d.drawString("not connected", w / 2, 30);
+    }
+
+    for (int i = 0; i < SC_MAX_NETS; i++)
+        _wsDrawRow(i, ssids[i], conn.length() && ssids[i] == conn,
+                   i == holdRow ? holdFrac : 0.0f);
+
+    // Footer: the phone portal is still the only way to edit the server record.
+    d.fillRoundRect(8, WS_FOOT_Y, w - 16, WS_FOOT_H, 6, _pcol(26, 16, 58));
+    d.drawRoundRect(8, WS_FOOT_Y, w - 16, WS_FOOT_H, 6, _pcol(90, 55, 165));
+    d.setTextDatum(middle_center);
+    d.setTextColor(_pcol(150, 210, 255), _pcol(26, 16, 58));
+    d.drawString("Phone setup (server + WiFi)", w / 2, WS_FOOT_Y + WS_FOOT_H / 2);
+
+    d.setTextDatum(top_center);
+    d.setTextColor(_pcol(120, 110, 160), _pcol(8, 6, 20));
+    d.drawString("tap edit / hold clear / swipe left back", w / 2, 210);
+    d.drawString("top slot is tried first", w / 2, 224);
+}
+
+// SSID → password → save, aimed at one slot. Cancelling either keyboard leaves
+// NVS untouched. A blank SSID or blank password is REFUSED, not saved: a blank
+// key writes an unjoinable network that the ladder then wastes 8s on every pass,
+// and on a single-slot device it is the lockout we had to reflash out of.
+// Returns true if the slot was written.
+static bool _wsEditSlot(int i) {
+    String tSsid = "Slot " + String(i + 1) + " - WiFi name (SSID):";
+    String ssid  = tkPrompt(tSsid.c_str(), false);
+    ssid.trim();
+    if (ssid.length() == 0) {
+        _wsMsg("Not saved", "cancelled, or no name entered", _pcol(255, 170, 120), 1400);
+        return false;
+    }
+    // Name the network on the password screen — it's the confirmation that the
+    // SSID went in, and which of the three slots you're filling.
+    String tPass = "Password for " + _wsFit(ssid, 20) + ":";
+    String pass  = tkPrompt(tPass.c_str(), true);
+    if (pass.length() == 0) {
+        _wsMsg("Not saved", "cancelled, or no password entered", _pcol(255, 170, 120), 1400);
+        return false;
+    }
+    _saveSlot(i, ssid, pass);
+    _wsMsg("Saved", "slot " + String(i + 1) + ": " + _wsFit(ssid, 28), _pcol(120, 240, 150), 1400);
+    // Down? Climb again now, from the top — the new entry may be the one that
+    // answers. Already up? Leave the working link alone; the new slot takes
+    // effect at the next boot or drop.
+    if (WiFi.status() != WL_CONNECTED) _ladderReset();
+    return true;
+}
+
+void launchWifiSlots() {
+    auto& d = M5StackChan.Display();
+    String ssids[SC_MAX_NETS], passes[SC_MAX_NETS];
+    String conn;
+    bool     dirty = true, wasTouch = false, holdFired = false;
+    int      downRow = -2;               // -2 = none, 0..2 = slot row, -1 = footer
+    int      downX = 0, downY = 0, lastX = 0, lastY = 0;
+    uint32_t downMs = 0, lastConnCheck = 0, lastHoldDraw = 0;
+
+    _wsDrainTouch();   // don't inherit the tap that opened this screen
+    for (;;) {
+        M5StackChan.update();
+
+        // Refresh the "on <ssid>" header if the link changes while we sit here.
+        if (millis() - lastConnCheck > 1000) {
+            lastConnCheck = millis();
+            String now = wifiConnectedSsid();
+            if (now != conn) { conn = now; dirty = true; }
+        }
+        if (dirty) {
+            _loadCreds(ssids, passes);
+            _wsDrawList(ssids, conn, -1, 0.0f);
+            dirty = false;
+        }
+
+        int16_t tx = 0, ty = 0;
+        bool touching = d.getTouch(&tx, &ty);
+
+        if (touching && !wasTouch) {                      // press
+            wasTouch = true; holdFired = false;
+            downX = lastX = tx; downY = lastY = ty; downMs = millis();
+            downRow = -2;
+            if (ty >= WS_ROW_Y0 && ty < WS_ROW_Y0 + SC_MAX_NETS * WS_ROW_H)
+                downRow = (ty - WS_ROW_Y0) / WS_ROW_H;
+            else if (ty >= WS_FOOT_Y && ty < WS_FOOT_Y + WS_FOOT_H)
+                downRow = -1;
+        } else if (touching) {                            // held
+            lastX = tx; lastY = ty;
+            bool moved = abs(lastX - downX) > 14 || abs(lastY - downY) > 14;
+            if (downRow >= 0 && !holdFired && !moved) {
+                uint32_t heldMs = millis() - downMs;
+                if (heldMs >= WS_HOLD_MS) {               // hold complete → clear
+                    holdFired = true;
+                    if (ssids[downRow].length()) {
+                        _clearSlot(downRow);
+                        _wsMsg("Cleared", "slot " + String(downRow + 1),
+                               _pcol(255, 150, 150), 1000);
+                    }
+                    dirty = true;
+                } else if (ssids[downRow].length() && millis() - lastHoldDraw > 60) {
+                    lastHoldDraw = millis();              // fill the row as they hold (throttled)
+                    _wsDrawRow(downRow, ssids[downRow],
+                               conn.length() && ssids[downRow] == conn,
+                               (float)heldMs / (float)WS_HOLD_MS);
+                }
+            }
+        } else if (wasTouch) {                            // release
+            wasTouch = false;
+            int dx = lastX - downX, dy = lastY - downY;
+            int row = downRow;
+            downRow = -2;
+            if (holdFired) { delay(8); continue; }        // hold already acted
+            if (dx < -WS_SWIPE && abs(dy) < 55) return;   // right-to-left → back to Settings
+            if (abs(dx) < 14 && abs(dy) < 14) {
+                if (row == -1) { _runPortal(); return; }  // never returns (reboots on save)
+                if (row >= 0)  { _wsEditSlot(row); _wsDrainTouch(); dirty = true; }
+            } else {
+                dirty = true;                             // a stray drag smudged a row
+            }
+        }
+        delay(8);
+    }
+}
 
 
 static void wifiSupervisorTick() {
-    static int sFailCount = 0;
-
     if (WiFi.status() == WL_CONNECTED) {
         if (!sWifiConnected) {
             sWifiConnected = true;
             sConnectedAt   = millis();
-            sFailCount     = 0;
-            Serial.printf("[wifi] connected: %s\n", WiFi.localIP().toString().c_str());
+            _ladderReset();
+            Serial.printf("[wifi] connected: %s (%s)\n",
+                          WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
         }
         if (!sSyncDone && millis() - sConnectedAt > 10000) {
             sSyncDone = true;   // connection settled (gates the health re-probe below)
@@ -553,16 +907,12 @@ static void wifiSupervisorTick() {
         sSyncDone      = false;
         sConnectedAt   = 0;
         sHealthOnline  = false;   // re-probe health once the link comes back
-        Serial.println("[wifi] disconnected — will retry");
+        _ladderReset();           // a drop re-runs the ladder from slot 0
+        Serial.println("[wifi] disconnected — re-running the ladder");
     }
-    // Iris watchdog: rotate saved slots, retry FOREVER; portal is boot-onboarding
-    // only, never raised on a runtime drop. Back off 15s -> 60s after 8 tries.
-    uint32_t now = millis();
-    uint32_t interval = (sFailCount >= 8) ? 60000UL : 15000UL;
-    if (now - sLastReconnect < interval) return;
-    sLastReconnect = now;
-    if (ESP.getMaxAllocHeap() >= 80000) { _tryNextNetwork(); sFailCount++; }
-    else { WiFi.mode(WIFI_OFF); delay(100); WiFi.mode(WIFI_STA); }
+    // Iris watchdog: climb the ladder, retry FOREVER; the portal is boot-onboarding
+    // only, never raised on a runtime drop.
+    _ladderTick();
 }
 
 // ── Globals ───────────────────────────────────────────────────────────────────
@@ -773,32 +1123,61 @@ void setup() {
     face.setStatusVisible(true);
     face.setStatusLine("connecting");   // on-screen IP:port removed (Astro)
 
+    _migrateLegacyCreds();   // pre-slot single-entry config → slot 0 (no-op after the first run)
     int n = _loadCreds(ssids, passes);
     Serial.printf("[wifi] _loadCreds → n=%d\n", n);
     if (n == 0) {
         _runPortal();  // no creds — captive setup portal (Dio-Setup)
     } else {
-        // Try each saved network on the boot splash — same screen as "homing
-        // servos...". First slot gets the full 12s; extra slots get 8s each.
-        d.drawString("connecting wifi...", d.width() / 2, d.height() / 2 + 32);
-        for (int slot = 0; slot < n && WiFi.status() != WL_CONNECTED; slot++) {
+        // Climb the ladder on the boot splash — same screen as "homing servos...".
+        // Empty slots are skipped; each candidate gets SC_SLOT_JOIN_MS, and the
+        // SSID being tried is named on screen so a slot that fails is VISIBLE
+        // rather than looking like a generic hang.
+        const int LY = d.height() / 2 + 32;
+        d.drawString("connecting wifi...", d.width() / 2, LY);
+        for (int slot = 0; slot < SC_MAX_NETS && WiFi.status() != WL_CONNECTED; slot++) {
+            if (!ssids[slot].length()) continue;          // unused slot
             Serial.printf("[wifi] boot slot %d: %s\n", slot, ssids[slot].c_str());
+            d.fillRect(0, LY + 12, d.width(), 12, TFT_BLACK);
+            d.drawString((String(slot + 1) + ": " + ssids[slot]).c_str(), d.width() / 2, LY + 18);
             _wifiJoin(ssids[slot].c_str(), passes[slot].c_str());
-            int ticks = (slot == 0) ? 120 : 80;
-            for (int i = 0; i < ticks && WiFi.status() != WL_CONNECTED; i++) delay(100);
+            uint32_t t0 = millis();
+            while (millis() - t0 < SC_SLOT_JOIN_MS && WiFi.status() != WL_CONNECTED) {
+                if (_joinRejected(millis() - t0)) break;   // bad key / not in the air → next slot now
+                delay(100);
+            }
         }
         if (WiFi.status() == WL_CONNECTED) {
             sWifiConnected = true;
             sConnectedAt   = millis();
-            Serial.printf("[wifi] connected: %s\n", WiFi.localIP().toString().c_str());
+            // Name the network we actually landed on — with three candidates,
+            // "connected" on its own tells you nothing.
+            d.fillRect(0, LY - 6, d.width(), 30, TFT_BLACK);
+            d.setTextColor(TFT_GREEN, TFT_BLACK);
+            d.drawString(("connected: " + WiFi.SSID()).c_str(), d.width() / 2, LY);
+            d.setTextColor(TFT_WHITE, TFT_BLACK);
+            Serial.printf("[wifi] connected: %s (%s)\n",
+                          WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
             // Boot health probe → status word. Refreshed in the loop until online
             // so a transient hiccup here doesn't stick. (Iris lesson)
             _refreshHealthStatus();
             sLastHealth = millis();
         } else {
-            // All saved networks failed at boot → captive setup portal (onboarding).
+            // Every filled slot failed at boot → captive setup portal (onboarding).
             // Runtime drops are the watchdog's job (retry forever), not this.
-            Serial.println("[wifi] boot join failed — opening Dio-Setup portal");
+            // Name what was tried first — otherwise the portal appearing looks
+            // like Dio forgot the networks rather than none of them answering.
+            d.fillRect(0, LY - 6, d.width(), 30, TFT_BLACK);
+            d.setTextColor(TFT_RED, TFT_BLACK);
+            String tried;
+            for (int i = 0; i < SC_MAX_NETS; i++)
+                if (ssids[i].length()) tried += (tried.length() ? ", " : "") + ssids[i];
+            d.drawString("no answer from:", d.width() / 2, LY);
+            d.drawString(tried.c_str(), d.width() / 2, LY + 14);
+            d.setTextColor(TFT_WHITE, TFT_BLACK);
+            Serial.printf("[wifi] boot join failed (%s) — opening Dio-Setup portal\n",
+                          tried.c_str());
+            delay(2500);
             _runPortal();
         }
     }
