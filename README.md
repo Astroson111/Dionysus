@@ -6,6 +6,9 @@ voice body for the **Ph3b3** assistant. Dio listens on a tap, streams your speec
 server for transcription + reasoning, and speaks the reply back with a cosmic animated face and
 voice-synced captions.
 
+> **New here? Start with [QUICKSTART.md](QUICKSTART.md)** — box to talking in about 20 minutes.
+> This README is the full reference.
+
 > Extracted 2026-07-12 from the `ph3b3` monorepo into its own home. The Ph3b3 server (STT,
 > reasoning, TTS) lives separately; Dio talks to it over HTTPS on the LAN.
 
@@ -21,6 +24,7 @@ by Ph3b3) · Dio (this repo). All local, all clients of the same server.
 
 ## Repo layout
 ```
+QUICKSTART.md        first-time setup: build, flash, first boot, first words
 Ph3b3-Chan/          the Arduino sketch (open this folder in the IDE)
   Ph3b3-Chan.ino     entry point, app registration, WiFi, boot homing, LED cue
   AppManager.h       cooperative app/state manager
@@ -82,7 +86,9 @@ on Windows is usually exFAT; reformat it FAT32).
 
 ## Build & flash
 Use **arduino-cli** (or the Arduino IDE). **Never PlatformIO** — `pio run` builds the wrong
-~1.0 MB binary from an orphaned prototype and bricks the device. A correct build is **~1.39 MB**.
+~1.0 MB binary from an orphaned prototype and bricks the device. A correct build is **~1.49 MB**
+(it was ~1.39 MB before the three-slot WiFi work; the ~1.0 MB wrong-target signature is what
+matters).
 
 ```bash
 # one-time: copy and fill in your WiFi + Ph3b3-server creds
